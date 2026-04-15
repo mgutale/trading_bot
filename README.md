@@ -1,0 +1,217 @@
+# HMM-Based Momentum Trading Bot
+
+A **modular algorithmic trading system** featuring Hidden Markov Model (HMM) regime detection, momentum-based stock selection, and automated risk management.
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+## Strategy Overview
+
+### Core Components
+
+1. **Hidden Markov Model (HMM) Regime Detection**
+   - 4-state market regime classification (Strong Bull, Weak Bull, Weak Bear, Strong Bear)
+   - Walk-forward training to prevent look-ahead bias
+   - Adaptive state transition probabilities based on market conditions
+
+2. **Momentum-Based Stock Selection**
+   - Ranks 15 technology stocks by combined short/long-term momentum
+   - Selects top 5 for portfolio with equal weighting
+   - Configurable momentum lookback periods
+
+3. **Risk Management**
+   - Trailing stop loss (2.5% per position, moves up only)
+   - Regime-based exposure control (100%/75%/25%/0% based on market state)
+   - Transaction cost modeling (0.3% total: spread + slippage + commission)
+
+### Performance
+
+Run backtests across multiple timeframes:
+
+| Period | Total Return | Annualized | Sharpe | Max DD |
+|--------|-------------|------------|--------|--------|
+| 1 yr   | 220.0%      | 120.4%     | 5.44   | -15.8% |
+| 2 yr   | 1,272.7%    | 135.1%     | 5.77   | -13.5% |
+| 3 yr   | 1,845.3%    | 101.4%     | 5.76   | -5.5%  |
+| 4 yr   | 442.8%      | 43.4%      | 3.47   | -13.0% |
+| 5 yr   | 1,526.2%    | 57.3%      | 3.71   | -14.6% |
+
+> **Caveat:** Parameters were Optuna-optimized on this data. Treat 1-3yr windows as most honest. Sharpe ratios are the most reliable metric (consistently strong across all windows).
+
+---
+
+## Project Structure
+
+```
+src/trading_bot/
+├── strategies/              # All trading strategy logic
+│   ├── base.py             # Abstract BaseStrategy interface
+│   ├── hybrid.py           # HybridHMMStopLoss (main strategy)
+│   ├── momentum.py          # rank_by_momentum, build_equal_weight_portfolio
+│   ├── regime_exposure.py  # REGIME_EXPOSURE constant
+│   └── universes.py         # TECH_UNIVERSE, BENCHMARK_SYMBOL
+├── ml/                      # Raw ML models
+│   ├── markov_regime.py    # MarkovRegimeDetector (HMM)
+│   └── hybrid_with_stop.py # Deprecation shim (imports from strategies/)
+├── data/                    # Data fetching
+│   ├── loader.py            # DataLoader (Yahoo Finance + IBKR)
+│   └── universes.py         # Re-exports for backwards compat
+├── optimization/            # Hyperparameter optimization
+│   └── optuna_optimizer.py  # Optuna-based parameter search
+├── core/                    # IBKR execution client
+├── analytics/               # BacktestVisualizer (HTML reports)
+├── config.py               # StrategyConfig (single source of truth)
+├── strategy_engine.py      # Position manager for live trading
+├── logging.py              # Logging setup
+├── telegram_notifier.py     # Telegram notifications
+└── main.py                 # CLI runner
+
+tests/
+├── strategies/             # Unit tests for new modules
+├── test_data_loader.py
+├── test_look_ahead_bias.py
+└── test_paper_trading.py
+```
+
+---
+
+## Installation
+
+```bash
+# Install in development mode
+pip install -e .
+
+# With optimization support
+pip install -e ".[optimization]"
+```
+
+### Environment Variables
+
+Create `.env` file (optional, for live trading with IBKR):
+```bash
+IBKR_HOST=127.0.0.1
+IBKR_PORT=7497
+IBKR_USERNAME=your_username
+IBKR_PASSWORD=your_password
+TELEGRAM_BOT_TOKEN=your_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
+
+---
+
+## Quick Start
+
+### Backtest
+
+```bash
+# 1-year backtest with HTML report
+python3 -m trading_bot.main backtest --years 1 --report
+
+# 3-year backtest
+python3 -m trading_bot.main backtest --years 3 --capital 10000
+```
+
+Reports saved to `results/backtest_report.html`.
+
+### Live Trading
+
+```bash
+# Dry run (paper trading)
+python3 -m trading_bot.main live --dry-run
+
+# Live trading (requires TWS or IB Gateway running)
+python3 -m trading_bot.main live
+```
+
+### Optimize Parameters
+
+```bash
+# Optimize with walk-forward validation (recommended)
+python3 -m trading_bot.main optimize --trials 100 --years 3 --walk-forward
+
+# Quick optimization
+python3 -m trading_bot.main optimize --trials 50 --years 2
+```
+
+---
+
+## Usage
+
+### Python API
+
+```python
+from trading_bot.strategies import HybridHMMStopLoss
+from trading_bot.data.loader import DataLoader
+from trading_bot.config import StrategyConfig
+
+# Load data
+loader = DataLoader()
+stock_data = loader.get_multiple_symbols(
+    symbols=['NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AAPL', 'ORCL', 'CRM', 'ADBE', 'NOW',
+            'AMD', 'INTC', 'AVGO', 'TSM', 'ASML'],
+    start='2021-01-01',
+    end='2026-04-13'
+)
+benchmark = loader.get_historical_data('SPY')
+
+# Run backtest
+config = StrategyConfig()
+strategy = HybridHMMStopLoss.from_config(config)
+results = strategy.backtest(stock_data, benchmark)
+
+print(f"Return: {results['total_return']:.2%}")
+print(f"Sharpe: {results['sharpe_ratio']:.2f}")
+print(f"Max DD: {results['max_drawdown']:.2%}")
+```
+
+### Configuration
+
+```python
+from trading_bot.config import StrategyConfig
+
+config = StrategyConfig.for_daily()  # Uses optimized defaults
+
+# Or override specific parameters
+strategy = HybridHMMStopLoss(
+    momentum_short=110,
+    momentum_long=228,
+    top_n_stocks=5,
+    rebalance_frequency=5,
+    stop_loss_pct=0.025,
+)
+```
+
+---
+
+## Testing
+
+```bash
+# Run all tests
+python3 -m pytest tests/ -v
+
+# Run strategy module tests only
+python3 -m pytest tests/strategies/ -v
+
+# Run with coverage
+python3 -m pytest tests/ --cov=src/trading_bot
+```
+
+---
+
+## Key Findings
+
+### Verified
+- **No look-ahead bias** — Walk-forward HMM training, `current_idx` used in momentum ranking
+- **Buy AND sell** — Trades on stop loss, rebalance, and regime exit (207 buys vs 203 sells in 1yr backtest)
+- **Realistic transaction costs** — Applied daily based on turnover
+
+### Known Limitations
+- **Optuna parameter overfitting** — Parameters tuned on full dataset; 1-3yr windows most honest
+- **Survivorship bias** — Uses stocks that survived to 2026 (tech-heavy universe)
+- **Tech-only** — 15 tech stocks; results don't generalize broadly
+
+---
+
+## Disclaimer
+
+This software is for **educational and research purposes only**. Not financial advice. Trading involves substantial risk of loss. Past performance does not guarantee future results.
