@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+*.manifest
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data & Results
+data/*.parquet
+results/*.html
+results/*.png
+results/*.jpg
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Credentials
+.credentials.json
+*.key
+*.pem
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Trading Bot specific
+*.pid
+.trade_history.json

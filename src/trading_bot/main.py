@@ -7,15 +7,19 @@ Hybrid HMM + 5% Stop Loss Strategy
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from pathlib import Path
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+import pandas as pd
+
 from trading_bot.logging import setup_logging
 from trading_bot.config import TradingBotConfig
 from trading_bot.data.loader import DataLoader
 from trading_bot.strategies.hybrid import HybridHMMStopLoss
+from trading_bot.strategies.universes import TECH_UNIVERSE, BENCHMARK_SYMBOL
 
 console = Console()
 
@@ -48,9 +52,9 @@ def main(ctx, config: Optional[str], verbose: bool):
 @main.command()
 @click.option("--years", "-y", default=5, type=float, help="Number of years to backtest")
 @click.option("--capital", "-c", default=5000, help="Initial capital")
-@click.option("--report", "-r", is_flag=True, help="Generate HTML report with charts")
+@click.option("--dashboard", "-d", is_flag=True, help="Launch analytics dashboard")
 @click.pass_context
-def backtest(ctx, years: int, capital: float, report: bool):
+def backtest(ctx, years: int, capital: float, dashboard: bool):
     """Run backtest for the Hybrid HMM + 5% Stop Loss strategy."""
     logger = ctx.obj["logger"]
     config = ctx.obj["config"]
@@ -124,20 +128,32 @@ def backtest(ctx, years: int, capital: float, report: bool):
     console.print(f"\n[bold]Benchmark ({BENCHMARK_SYMBOL}) Return:[/bold] {results['benchmark_return']:.1%}")
     console.print(f"[bold]Outperformance:[/bold] {results['total_return'] - results['benchmark_return']:.1%}")
 
-    # Generate HTML report
-    if report:
-        console.print("\n[bold blue]Generating HTML Report with Charts...[/bold blue]")
+    # Launch dashboard
+    if dashboard:
+        console.print("\n[bold blue]Launching Analytics Dashboard...[/bold blue]")
         try:
-            from trading_bot.analytics.visualizer import BacktestVisualizer
-            import os
-            os.makedirs("results", exist_ok=True)
+            from trading_bot.analytics.dashboard import LiveDashboard, DashboardConfig
 
-            visualizer = BacktestVisualizer(results, strategy_name="Hybrid HMM + 5% Stop Loss")
-            report_path = visualizer.create_full_report(save_path="results/backtest_report.html")
-            console.print(f"[green]HTML Report saved:[/green] {report_path}")
-            console.print("[dim]Open this file in your browser to view interactive charts.[/dim]")
+            config = DashboardConfig(initial_capital=capital)
+
+            dashboard = LiveDashboard.from_backtest_results(
+                results=results,
+                stock_data=tech_data,
+                benchmark_data=benchmark_data,
+                config=config,
+            )
+
+            console.print(f"[green]Dashboard running at http://localhost:8050[/green]")
+            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+            dashboard.run(debug=False, port=8050)
+
+        except ImportError as e:
+            console.print(f"[red]Import Error: {e}[/red]")
+            console.print("Ensure dash is installed: pip install dash")
         except Exception as e:
-            console.print(f"[red]Failed to generate report: {e}[/red]")
+            import traceback
+            console.print(f"[red]Failed to launch dashboard: {e}[/red]")
+            console.print(f"[red]{traceback.format_exc()}[/red]")
 
 
 @main.command()
@@ -183,8 +199,9 @@ def analyze(ctx, symbol: str):
 @click.option("--daily", "-d", is_flag=True, help="Run daily at market open")
 @click.option("--time", "-t", default="09:30", help="Daily run time (HH:MM format, default 09:30)")
 @click.option("--telegram", is_flag=True, help="Send daily reports via Telegram")
+@click.option("--dashboard", is_flag=True, help="Launch analytics dashboard alongside trading")
 @click.pass_context
-def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bool):
+def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bool, dashboard: bool):
     """Run live trading with Interactive Brokers.
 
     \b
@@ -225,6 +242,10 @@ def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bo
         else:
             console.print("[red]LIVE MODE - Real trades will be executed[/red]\n")
 
+        # Launch dashboard if requested
+        if dashboard:
+            _launch_live_dashboard(ctx, logger)
+
         # Run once immediately, then schedule
         console.print("[bold]Running initial execution...[/bold]\n")
         _run_trading_cycle(ctx, dry_run, lookback, logger, telegram=telegram)
@@ -234,7 +255,8 @@ def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bo
         console.print("[dim]Bot will run automatically every trading day at market open.[/dim]")
         if telegram:
             console.print("[dim]Daily reports will be sent via Telegram.[/dim]")
-        console.print("[dim]Dashboard available at: logs/dashboard.html[/dim]")
+        if dashboard:
+            console.print("[dim]Dashboard running at http://localhost:8050[/dim]")
         console.print("[dim]Press Ctrl+C to stop the scheduler.[/dim]\n")
 
         import schedule
@@ -258,7 +280,7 @@ def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bo
 
         return
 
-    # Single run mode (existing behavior)
+    # Single run mode
     console.print(f"\n[bold blue]Live Trading: Hybrid HMM + 5% Stop Loss (Daily)[/bold blue]")
     console.print(f"Historical data: {lookback} days for HMM initialization")
     if dry_run:
@@ -283,7 +305,7 @@ def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bo
         return
 
     # Fetch historical data for HMM initialization
-    from trading_bot.data.loader import DataLoader, TECH_UNIVERSE, BENCHMARK_SYMBOL
+    from trading_bot.data.loader import DataLoader
 
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
@@ -352,6 +374,65 @@ def live(ctx, dry_run: bool, lookback: int, daily: bool, time: str, telegram: bo
     if not dry_run:
         pass
 
+    # Launch dashboard if requested (runs in background thread)
+    if dashboard:
+        _launch_live_dashboard(ctx, logger)
+
+
+def _launch_live_dashboard(ctx, logger):
+    """Launch the live trading dashboard in a background thread."""
+    try:
+        from trading_bot.analytics.dashboard import LiveDashboard, DashboardConfig
+        from trading_bot.strategy_engine import PositionManager
+        from trading_bot.config import StrategyConfig
+        from trading_bot.data.loader import DataLoader
+        from trading_bot.strategies.universes import TECH_UNIVERSE, BENCHMARK_SYMBOL
+        from datetime import timedelta
+
+        config = ctx.obj["config"]
+        strat_config = StrategyConfig.for_daily()
+
+        # Initialize position manager
+        pm = PositionManager(
+            stop_loss_pct=strat_config.stop_loss_pct,
+            take_profit_pct=strat_config.take_profit_pct,
+            max_positions=strat_config.top_n_stocks,
+            position_size_pct=strat_config.position_size_pct,
+        )
+
+        # Get historical data
+        loader = DataLoader()
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+
+        benchmark_data = loader.get_historical_data(BENCHMARK_SYMBOL, timeframe="1Day", start=start_date, end=end_date)
+        tech_data = loader.get_multiple_symbols(TECH_UNIVERSE, timeframe="1Day", start=start_date, end=end_date)
+
+        # Initialize strategy
+        strat = HybridHMMStopLoss.from_config(strat_config, use_walkforward=True, transaction_costs=False)
+        strat.fit(benchmark_data)
+
+        # Create dashboard
+        dash_config = DashboardConfig(initial_capital=config.risk.initial_capital, update_interval_seconds=5)
+        dashboard = LiveDashboard.from_live_manager(
+            position_manager=pm,
+            strategy=strat,
+            ibkr_client=None,
+            config=dash_config,
+        )
+
+        console.print("[green]Dashboard running at http://localhost:8050[/green]")
+
+        # Run in background thread
+        import threading
+        thread = threading.Thread(target=dashboard.run, kwargs={'debug': False, 'port': 8050}, daemon=True)
+        thread.start()
+
+    except ImportError as e:
+        console.print(f"[yellow]Dashboard not available: {e}[/yellow]")
+    except Exception as e:
+        console.print(f"[yellow]Failed to launch dashboard: {e}[/yellow]")
+
 
 def _run_trading_cycle(ctx, dry_run: bool, lookback: int, logger, telegram: bool = False):
     """Execute a single trading cycle (called by daily scheduler)."""
@@ -375,7 +456,7 @@ def _run_trading_cycle(ctx, dry_run: bool, lookback: int, logger, telegram: bool
         return
 
     # Fetch historical data
-    from trading_bot.data.loader import DataLoader, TECH_UNIVERSE, BENCHMARK_SYMBOL
+    from trading_bot.data.loader import DataLoader
 
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")

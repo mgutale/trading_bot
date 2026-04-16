@@ -1,4 +1,5 @@
 # Analytics Module
-from .visualizer import BacktestVisualizer
+# Dashboard components are imported lazily to avoid requiring dash
+# when not using the dashboard
 
-__all__ = ["BacktestVisualizer"]
+__all__ = []

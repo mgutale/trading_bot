@@ -72,7 +72,7 @@ class MarkovRegimeDetector:
                 self.model = hmm.GaussianHMM(
                     n_components=self.n_states,
                     covariance_type="diag",
-                    n_iter=1000,
+                    n_iter=2000,
                     random_state=self.random_state + attempt,
                     init_params="stmc",
                     params="stmc",

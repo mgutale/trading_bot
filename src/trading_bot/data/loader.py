@@ -230,7 +230,4 @@ class DataLoader:
         logger.info(f"Cleared cache at {self.cache_dir}")
 
 
-# Backwards compatibility — prefer importing from strategies/universes.py
-from trading_bot.strategies.universes import TECH_UNIVERSE, SURVIVORSHIP_ADJUSTED_UNIVERSE, BENCHMARK_SYMBOL
-
-__all__ = ["DataLoader", "TECH_UNIVERSE", "SURVIVORSHIP_ADJUSTED_UNIVERSE", "BENCHMARK_SYMBOL"]
+__all__ = ["DataLoader"]

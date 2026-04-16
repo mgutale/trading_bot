@@ -36,6 +36,7 @@ class HybridHMMStopLoss(BaseStrategy):
        holds top N with equal weighting.
     3. Trailing Stop Loss: stop that moves up only, protecting profits.
     4. Regime-Based Exposure: 100%/75%/25%/0% based on market regime.
+    5. Position Sizing: Equal weight allocation capped by position_size_pct.
 
     All default parameters come from StrategyConfig (the single source of truth).
     Inherits from BaseStrategy.
@@ -49,6 +50,7 @@ class HybridHMMStopLoss(BaseStrategy):
         top_n_stocks: int = _defaults.top_n_stocks,
         rebalance_frequency: int = _defaults.rebalance_frequency,
         stop_loss_pct: float = _defaults.stop_loss_pct,
+        position_size_pct: float = _defaults.position_size_pct,
         regime_exposure: Optional[Dict[str, float]] = None,
         universe: Optional[List[str]] = None,
         universe_method: str = "static",
@@ -64,6 +66,7 @@ class HybridHMMStopLoss(BaseStrategy):
         self.top_n_stocks = top_n_stocks
         self.rebalance_frequency = rebalance_frequency
         self.stop_loss_pct = stop_loss_pct
+        self.position_size_pct = position_size_pct  # Max allocation per position
         self.universe = universe or (
             SURVIVORSHIP_ADJUSTED_UNIVERSE if universe_method == "survivorship_adjusted"
             else TECH_UNIVERSE
@@ -83,6 +86,10 @@ class HybridHMMStopLoss(BaseStrategy):
         )
         self._stop_prices = {}
         self._entry_prices = {}
+        self._entry_dates = {}  # Track entry dates for enriched trades
+        self._entry_regimes = {}  # Track regime at entry for enriched trades
+        self._entry_qtys = {}  # Track quantity at entry for enriched trades
+        self._enriched_trades = []  # Enriched trade records for analytics dashboard
         self._trade_log = []
         self.fitted = False
 
@@ -103,6 +110,7 @@ class HybridHMMStopLoss(BaseStrategy):
             'top_n_stocks': config.top_n_stocks,
             'rebalance_frequency': config.rebalance_frequency,
             'stop_loss_pct': config.stop_loss_pct,
+            'position_size_pct': config.position_size_pct,
             'regime_exposure': dict(config.regime_exposure),
             'spread_pct': config.spread_pct,
             'slippage_pct': config.slippage_pct,
@@ -133,19 +141,22 @@ class HybridHMMStopLoss(BaseStrategy):
         self.fitted = True
         return self
 
-    def _get_momentum_ranking(
+    def _get_momentum_scores(
         self,
         stock_data: Dict[str, pd.DataFrame],
         current_idx: int = None
-    ) -> List[str]:
+    ) -> Dict[str, float]:
         """
-        Rank stocks by momentum and return top N.
+        Calculate momentum scores for all stocks in universe.
 
         Args:
             stock_data: Dictionary of symbol -> DataFrame with price data
             current_idx: Index position for current date in backtest.
-                        If None, uses end of data (live trading where data ends at current date).
 
+        Returns:
+            Dictionary mapping symbol -> momentum score
+
+        Momentum = short-term momentum + long-term momentum
         Uses prices.iloc[current_idx] to avoid look-ahead bias.
         """
         momentum_scores = {}
@@ -174,8 +185,130 @@ class HybridHMMStopLoss(BaseStrategy):
 
             momentum_scores[symbol] = mom_short + mom_long
 
+        return momentum_scores
+
+    def _get_momentum_ranking(
+        self,
+        stock_data: Dict[str, pd.DataFrame],
+        current_idx: int = None
+    ) -> List[str]:
+        """
+        Rank stocks by momentum and return top N symbols.
+
+        Args:
+            stock_data: Dictionary of symbol -> DataFrame with price data
+            current_idx: Index position for current date in backtest.
+
+        Returns:
+            List of top N stock symbols by momentum score.
+        """
+        momentum_scores = self._get_momentum_scores(stock_data, current_idx)
         ranked = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
         return [s[0] for s in ranked[:self.top_n_stocks]]
+
+    def _calculate_momentum_weights(
+        self,
+        momentum_scores: Dict[str, float],
+        exposure: float,
+        top_n: int = None
+    ) -> Dict[str, float]:
+        """
+        Calculate momentum-weighted position allocations.
+
+        Higher momentum stocks get proportionally larger weights.
+        Weights are scaled to sum to the target exposure level.
+
+        Args:
+            momentum_scores: Dictionary mapping symbol -> momentum score
+            exposure: Target total exposure (0.0 to 1.0)
+            top_n: Number of top stocks to select (uses self.top_n_stocks if None)
+
+        Returns:
+            Dictionary mapping symbol -> position weight
+
+        Example:
+            If NVDA has momentum score 0.15 and INTC has 0.05,
+            NVDA gets 3x the weight of INTC.
+        """
+        top_n = top_n or self.top_n_stocks
+
+        # Select top N stocks by momentum (may add more if needed to fill exposure)
+        ranked = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
+
+        if not ranked:
+            return {}
+
+        # Filter to only positive momentum stocks (avoid allocating to declining stocks)
+        positive_momentum = [(sym, score) for sym, score in ranked if score > 0]
+
+        if not positive_momentum:
+            # If all momentum scores are negative, fall back to equal weight
+            # This ensures we still participate when everything is weak
+            positive_momentum = ranked[:top_n]
+
+        if not positive_momentum:
+            # If all momentum scores are negative, fall back to equal weight
+            # This ensures we still participate when everything is weak
+            positive_momentum = ranked
+
+        # Calculate total momentum score
+        total_momentum = sum(score for _, score in positive_momentum)
+
+        if total_momentum <= 0:
+            # Fallback to equal weight if total momentum is zero or negative
+            weight_per_stock = exposure / len(positive_momentum)
+            return {sym: weight_per_stock for sym, _ in positive_momentum}
+
+        # Allocate weights proportional to momentum score
+        # Each stock's weight = (its momentum / total momentum) * exposure
+        # Capped at position_size_pct to avoid over-concentration
+        weights = {}
+        capped_symbols = set()
+
+        # First pass: calculate raw weights and identify capped positions
+        for symbol, score in positive_momentum:
+            raw_weight = (score / total_momentum) * exposure
+            if raw_weight >= self.position_size_pct:
+                weights[symbol] = self.position_size_pct
+                capped_symbols.add(symbol)
+
+        # Check if we have remaining exposure to allocate
+        current_total = sum(weights.values())
+        remaining_exposure = exposure - current_total
+
+        # Second pass: redistribute remaining exposure to uncapped symbols
+        if remaining_exposure > 0.001:
+            uncapped = [(sym, score) for sym, score in positive_momentum if sym not in capped_symbols]
+            if uncapped:
+                uncapped_total = sum(score for _, score in uncapped)
+                for symbol, score in uncapped:
+                    additional = (score / uncapped_total) * remaining_exposure
+                    weights[symbol] = min(weights.get(symbol, 0) + additional, self.position_size_pct)
+
+        # Final normalization: if still below target, scale up (some may be capped)
+        current_total = sum(weights.values())
+        if current_total > 0 and current_total < exposure:
+            # Proportionally increase uncapped positions
+            scale_factor = exposure / current_total
+            final_weights = {}
+            for sym, w in weights.items():
+                scaled = w * scale_factor
+                final_weights[sym] = min(scaled, self.position_size_pct)
+            weights = final_weights
+
+        # If still below target exposure, add more stocks from the ranked list
+        current_total = sum(weights.values())
+        if current_total < exposure - 0.01 and len(weights) < len(ranked):
+            # Add additional stocks until we reach target or run out
+            # Include stocks with any momentum score (even negative) to fill exposure
+            for sym, score in ranked:
+                if sym not in weights:
+                    remaining = exposure - sum(weights.values())
+                    weights[sym] = min(remaining, self.position_size_pct)
+                    if sum(weights.values()) >= exposure - 0.01:
+                        break
+
+        return weights
 
     def generate_signals(
         self,
@@ -288,6 +421,15 @@ class HybridHMMStopLoss(BaseStrategy):
                     self._trade_log.append((idx, symbol, 'sell', 'stop_loss'))
                     stopped_weight = position_weights.get(symbol, 0)
                     self._turnover_log.append((idx, stopped_weight))
+                    # Create enriched trade record for stop loss
+                    self._create_enriched_trade(
+                        symbol=symbol,
+                        exit_date=idx,
+                        exit_price=fill_price,
+                        reason='stop_loss',
+                        regime_at_exit=regime,
+                        price_data=price_data
+                    )
                     # Realize loss using the actual fill price
                     actual_loss = (fill_price - entry_price) / entry_price
                     daily_ret += actual_loss * position_weights.get(symbol, 1.0/len(active_positions))
@@ -329,7 +471,16 @@ class HybridHMMStopLoss(BaseStrategy):
                 # Track exposure at rebalance for scaling returns between rebalances
                 rebalance_exposure = exposure
                 # Use stock_pos (i+1) for correct index alignment
-                new_holdings = self._get_momentum_ranking(stock_data, current_idx=stock_pos)
+                # Get momentum scores for all stocks
+                momentum_scores = self._get_momentum_scores(stock_data, current_idx=stock_pos)
+
+                # Calculate momentum-weighted allocations
+                position_weights_target = self._calculate_momentum_weights(
+                    momentum_scores=momentum_scores,
+                    exposure=exposure,
+                    top_n=self.top_n_stocks
+                )
+                new_holdings = list(position_weights_target.keys())
 
                 # Calculate turnover BEFORE making changes (for transaction costs)
                 old_holdings = set(active_positions.keys())
@@ -341,32 +492,66 @@ class HybridHMMStopLoss(BaseStrategy):
                     # Exit all positions - turnover = sum of all old weights
                     for symbol in list(active_positions.keys()):
                         self._trade_log.append((idx, symbol, 'sell', 'regime_exit'))
+                        # Create enriched trade record for regime exit
+                        self._create_enriched_trade(
+                            symbol=symbol,
+                            exit_date=idx,
+                            exit_price=price_data[symbol].loc[idx] if symbol in price_data else None,
+                            reason='regime_exit',
+                            regime_at_exit=regime,
+                            price_data=price_data
+                        )
                     turnover = sum(old_weights.values())
                     self._turnover_log.append((idx, turnover))
                     active_positions.clear()
                     position_weights.clear()
                 else:
-                    # Equal weight per position
-                    weight_per_stock = exposure / len(new_holdings) if new_holdings else 0
-                    position_weights_target = {s: weight_per_stock for s in new_holdings}
 
                     # Remove stocks no longer in top N
                     for symbol in list(active_positions.keys()):
-                        if symbol not in new_holdings:
-                            self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
-                            del active_positions[symbol]
-                            del position_weights[symbol]
+                        self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
+                        # Create enriched trade record
+                        self._create_enriched_trade(
+                            symbol=symbol,
+                            exit_date=idx,
+                            exit_price=price_data[symbol].loc[idx] if symbol in price_data else None,
+                            reason='rebalance',
+                            regime_at_exit=regime,
+                            price_data=price_data
+                        )
+                        del active_positions[symbol]
+                        del position_weights[symbol]
 
                     # Add/update positions
                     for symbol in new_holdings:
                         if symbol not in active_positions and symbol in price_data:
-                            active_positions[symbol] = price_data[symbol].loc[idx]
-                            self._stop_prices[symbol] = price_data[symbol].loc[idx] * (1 - self.stop_loss_pct)
-                            position_weights[symbol] = position_weights_target.get(symbol, 0.1)
+                            entry_price = price_data[symbol].loc[idx]
+                            active_positions[symbol] = entry_price
+                            self._stop_prices[symbol] = entry_price * (1 - self.stop_loss_pct)
+                            position_weights[symbol] = position_weights_target.get(symbol, 0.0)
                             self._trade_log.append((idx, symbol, 'buy', 'rebalance'))
+                            # Track entry info for enriched trades
+                            self._entry_prices[symbol] = entry_price
+                            self._entry_dates[symbol] = idx
+                            self._entry_regimes[symbol] = regime
                         elif symbol in active_positions:
                             # Update weight for existing position (rebalancing)
                             position_weights[symbol] = position_weights_target.get(symbol, 0)
+
+                    # Remove positions with zero weight (no longer in top N or negative momentum)
+                    for symbol in list(position_weights.keys()):
+                        if position_weights[symbol] <= 0 and symbol in active_positions:
+                            self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
+                            self._create_enriched_trade(
+                                symbol=symbol,
+                                exit_date=idx,
+                                exit_price=price_data[symbol].loc[idx] if symbol in price_data else None,
+                                reason='rebalance',
+                                regime_at_exit=regime,
+                                price_data=price_data
+                            )
+                            del active_positions[symbol]
+                            del position_weights[symbol]
 
                     # Calculate turnover: sum of absolute weight changes / 2
                     all_symbols = old_holdings | new_holdings_set
@@ -511,6 +696,86 @@ class HybridHMMStopLoss(BaseStrategy):
         labels = {state: f'state_{state}' for state in range(self.n_states)}
         return regimes_numeric.map(labels).fillna('weak_bull')
 
+    def _create_enriched_trade(
+        self,
+        symbol: str,
+        exit_date,
+        exit_price: float,
+        reason: str,
+        regime_at_exit: str,
+        price_data: Dict[str, pd.Series],
+    ):
+        """
+        Create an enriched trade record for the analytics dashboard.
+
+        Args:
+            symbol: Stock symbol
+            exit_date: Exit date
+            exit_price: Exit price
+            reason: Reason for exit (stop_loss, rebalance, regime_exit)
+            regime_at_exit: Market regime at exit
+            price_data: Dictionary of symbol -> price series
+        """
+        # Get entry information
+        entry_price = self._entry_prices.get(symbol)
+        entry_date = self._entry_dates.get(symbol)
+        entry_regime = self._entry_regimes.get(symbol)
+        entry_stop_price = self._stop_prices.get(symbol, entry_price * (1 - self.stop_loss_pct) if entry_price else 0)
+
+        if entry_price is None or entry_date is None:
+            # Can't create enriched trade without entry info
+            return
+
+        # Calculate quantity from position value
+        qty = 0.0
+        if entry_price > 0:
+            # Use position_size_pct from config for quantity calculation
+            # Assuming $10k initial capital (used for analytics only)
+            initial_capital = 10000
+            position_value = initial_capital * self.position_size_pct
+            qty = position_value / entry_price
+
+        # Calculate P&L
+        if exit_price is not None and entry_price > 0:
+            realized_pnl = (exit_price - entry_price) * qty
+            realized_pnl_pct = (exit_price - entry_price) / entry_price
+        else:
+            realized_pnl = None
+            realized_pnl_pct = None
+
+        # Calculate holding period
+        holding_days = (exit_date - entry_date).days if isinstance(entry_date, type(exit_date)) else None
+
+        # Create enriched trade record
+        from trading_bot.analytics.dashboard.models import EnrichedTrade
+
+        trade = EnrichedTrade(
+            entry_date=entry_date,
+            exit_date=exit_date,
+            symbol=symbol,
+            side='buy',
+            entry_price=entry_price,
+            exit_price=exit_price,
+            qty=qty,
+            entry_stop_price=entry_stop_price,
+            realized_pnl=realized_pnl,
+            realized_pnl_pct=realized_pnl_pct,
+            unrealized_pnl=0.0,
+            total_pnl=realized_pnl if realized_pnl else 0.0,
+            holding_period_days=holding_days,
+            regime_at_entry=entry_regime or 'unknown',
+            regime_at_exit=regime_at_exit,
+            reason=reason,
+            momentum_score=None,
+        )
+
+        self._enriched_trades.append(trade)
+
+        # Clean up entry tracking for this symbol
+        self._entry_prices.pop(symbol, None)
+        self._entry_dates.pop(symbol, None)
+        self._entry_regimes.pop(symbol, None)
+
     def backtest(
         self,
         stock_data: Dict[str, pd.DataFrame],
@@ -620,6 +885,7 @@ class HybridHMMStopLoss(BaseStrategy):
             'stop_loss_trades': stop_loss_trades,
             'trade_log': self._trade_log,
             'turnover_log': self._turnover_log,
+            'enriched_trades': self._enriched_trades,  # Enriched trade records for analytics dashboard
             'rebalance_frequency_days': self.rebalance_frequency,
             'trading_frequency': 'daily',
             'uses_walkforward': self.use_walkforward,
