@@ -1,13 +1,9 @@
 """
 Analytics Dashboard
 
-Real-time analytics dashboard for trading bot.
+Backtest analytics dashboard for trading bot.
 """
 
-from trading_bot.analytics.dashboard.live_dashboard import (
-    LiveDashboard,
-    DashboardConfig,
-    create_dashboard_html,
-)
+from trading_bot.analytics.dashboard.report_generator import generate_backtest_report
 
-__all__ = ['LiveDashboard', 'DashboardConfig', 'create_dashboard_html']
+__all__ = ['generate_backtest_report']

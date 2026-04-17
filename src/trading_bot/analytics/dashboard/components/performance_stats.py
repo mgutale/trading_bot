@@ -8,6 +8,9 @@ from typing import Dict, Any
 from dash import html
 import plotly.graph_objects as go
 
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import color_for_return
+
 
 def create_stats_cards(stats: Dict[str, Any]) -> html.Div:
     """
@@ -33,20 +36,19 @@ def create_stats_cards(stats: Dict[str, Any]) -> html.Div:
     cards = []
     for name, value, fmt, invert in metrics:
         display = _format_value(value, fmt)
-        is_positive = _is_positive_value(value, name, invert)
-        css_class = 'positive' if is_positive else 'negative'
+        color = _get_metric_color(value, name, invert)
 
         cards.append(html.Div([
             html.Span(name, className='metric-label'),
             html.Br(),
-            html.Span(display, className=f'metric-value {css_class}'),
+            html.Span(display, className='metric-value', style={'color': color}),
         ], className='metric-card'))
 
     return html.Div(cards, className='stats-cards')
 
 
 def _format_value(value, fmt: str) -> str:
-    """Format a metric value for display."""
+    """Format a value for display."""
     if fmt == 'd':
         return f"{int(value):,}"
     elif '.1%' in fmt:
@@ -59,6 +61,18 @@ def _format_value(value, fmt: str) -> str:
         return f"{value:.2f}"
     else:
         return str(value)
+
+
+def _get_metric_color(value: float, name: str, invert: bool) -> str:
+    """Get color for a metric value."""
+    if name in ['Max Drawdown']:
+        return color_for_return(-value)  # Invert for drawdown (lower is better)
+    elif name in ['Sharpe Ratio', 'Sortino Ratio', 'Profit Factor']:
+        return color_for_return(value)
+    elif name == 'Win Rate':
+        # Win rate > 50% is good
+        return DEFAULT_THEME.success if value > 0.5 else DEFAULT_THEME.warning
+    return DEFAULT_THEME.text_primary
 
 
 def _is_positive_value(value: float, name: str, invert: bool) -> bool:
@@ -119,20 +133,17 @@ def create_metric_gauge(name: str, value: float, max_value: float = 1.0, unit: s
     Returns:
         Plotly Figure
     """
-    # Normalize value to 0-100 range
-    normalized = min(value / max_value * 100, 100) if max_value > 0 else 0
-
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
         domain={'x': [0, 1], 'y': [0, 1]},
         gauge={
             'axis': {'range': [0, max_value]},
-            'bar': {'color': '#1f77b4'},
+            'bar': {'color': DEFAULT_THEME.primary},
             'steps': [
-                {'range': [0, max_value * 0.5], 'color': '#2ca02c'},
-                {'range': [max_value * 0.5, max_value * 0.75], 'color': '#ff7f0e'},
-                {'range': [max_value * 0.75, max_value], 'color': '#d62728'},
+                {'range': [0, max_value * 0.5], 'color': DEFAULT_THEME.success},
+                {'range': [max_value * 0.5, max_value * 0.75], 'color': DEFAULT_THEME.warning},
+                {'range': [max_value * 0.75, max_value], 'color': DEFAULT_THEME.danger},
             ],
         },
         title={'text': name},

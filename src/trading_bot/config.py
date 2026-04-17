@@ -22,20 +22,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StrategyConfig:
-    """Configuration for Hybrid HMM + 5% Stop Loss strategy.
+    """Configuration for Hybrid HMM + Momentum strategy.
 
     THIS IS THE SINGLE SOURCE OF TRUTH for all strategy parameters.
     All classes and scripts should read defaults from here, not hardcode values.
     Import as: from trading_bot.config import StrategyConfig, REGIME_EXPOSURE
+
+    Parameters optimized on 2026-04-17 using 2 years of data (100 Optuna trials):
+    - Optimized for Sharpe ratio maximization
+    - Best Sharpe: 1.19 (vs 0.23 with previous params)
     """
     name: str = "hybrid_with_stop"
     timeframe: str = "1Day"           # Daily timeframe
     n_states: int = 4                 # 4-state HMM (Strong Bull/Weak Bull/Weak Bear/Strong Bear)
-    momentum_short: int = 110          # Short momentum lookback (must be < momentum_long) - optimized
-    momentum_long: int = 228           # Long momentum lookback (must be > momentum_short) - optimized
-    top_n_stocks: int = 5             # Top 5 stocks by momentum (aligned with live trading)
-    rebalance_frequency: int = 5      # Optimized: 5 days (more frequent rebalancing)
-    stop_loss_pct: float = 0.0251     # Optimized: 2.5% stop loss (tighter)
+    momentum_short: int = 43          # Optimized: short momentum lookback (43 days)
+    momentum_long: int = 176          # Optimized: long momentum lookback (176 days)
+    top_n_stocks: int = 8             # Optimized: top 8 stocks by momentum
+    rebalance_frequency: int = 19     # Optimized: rebalance every 19 days
+    stop_loss_pct: float = 0.0722     # Optimized: 7.22% stop loss (wider to avoid whipsaw)
     take_profit_pct: float = 0.15     # 15% take profit
     position_size_pct: float = 0.20   # 20% per position (equal weight for 5 stocks)
     spread_pct: float = 0.001        # 0.1% bid-ask spread
@@ -43,6 +47,22 @@ class StrategyConfig:
     commission_pct: float = 0.001     # 0.1% commission + PFOF cost + fees
     regime_exposure: Dict[str, float] = field(default_factory=lambda: dict(REGIME_EXPOSURE))
     universe_method: str = "static"  # "static" (TECH_UNIVERSE), "survivorship_adjusted", or "dynamic"
+    # Stock universe - define which stocks to trade directly here
+    # Common options: "tech" (TECH_UNIVERSE), "survivorship" (SURVIVORSHIP_ADJUSTED_UNIVERSE)
+    # Or provide custom list like ["TSLA", "NVDA", "AAPL", "MSFT"]
+    universe_list: list = field(default_factory=lambda: [
+        # Semiconductors
+        "NVDA", "AMD", "AVGO", "INTC", "TSM", "ASML",
+        # Big Tech
+        "MSFT", "GOOGL", "AMZN", "META", "AAPL", "ORCL",
+        # Software
+        "CRM", "ADBE", "NOW",
+        # Electric Vehicles & Clean Energy
+        "TSLA", "RIVN", "LCID", "NIO", "XPEV", "LI",
+        "ENPH", "SEDG", "FSLR", "RUN",
+        # Traditional Auto (EV transition)
+        "F", "GM",
+    ])
 
     def __post_init__(self):
         """Validate config parameters."""
@@ -76,7 +96,7 @@ class StrategyConfig:
             "momentum_long": 83,
             "stop_loss_pct": 0.053,
             "rebalance_frequency": 11,
-            "top_n_stocks": 5,
+            "top_n_stocks": 10,
             "take_profit_pct": 0.15,
             "position_size_pct": 0.20,
             "optimized_date": "2026-04-10",

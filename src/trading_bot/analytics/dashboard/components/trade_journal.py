@@ -9,10 +9,13 @@ from typing import List, Dict, Any
 from datetime import datetime
 from dash import html, dash_table, dcc
 
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import color_for_return
+
 
 def create_trade_journal_table(
     trades: List[Dict[str, Any]] = None,
-    max_rows: int = 100
+    max_rows: int = 100,
 ) -> html.Div:
     """
     Create interactive trade journal table.
@@ -27,7 +30,7 @@ def create_trade_journal_table(
     if not trades:
         return html.Div([
             html.H4("Trade Journal"),
-            html.P("No trades to display", style={'color': 'gray', 'fontStyle': 'italic'})
+            html.P("No trades to display", style={'color': DEFAULT_THEME.text_secondary, 'fontStyle': 'italic'}),
         ], className="trade-journal")
 
     # Prepare data for table
@@ -51,6 +54,7 @@ def create_trade_journal_table(
         holding_display = f"{holding}d" if holding is not None else "-"
 
         reason_display = _format_reason(t.get('reason', ''))
+        regime_display = _format_regime(t.get('regime_at_entry', ''))
 
         rows.append({
             'date': entry_date,
@@ -62,12 +66,16 @@ def create_trade_journal_table(
             'pnl': pnl_display,
             'pnl_pct': pnl_pct_display,
             'holding': holding_display,
-            'regime': _format_regime(t.get('regime_at_entry', '')),
+            'regime': regime_display,
             'reason': reason_display,
             'status': 'Closed' if t.get('exit_date') or t.get('is_closed') else 'Open',
         })
 
     df = pd.DataFrame(rows)
+
+    # Get unique symbols and reasons for filters
+    symbols = sorted(set(t.get('symbol', '') for t in trades))
+    reasons = sorted(set(t.get('reason', '') for t in trades))
 
     table = dash_table.DataTable(
         columns=[{'name': i.title(), 'id': i} for i in df.columns],
@@ -77,43 +85,49 @@ def create_trade_journal_table(
             'textAlign': 'center',
             'padding': '8px',
             'fontSize': '13px',
+            'backgroundColor': DEFAULT_THEME.bg_card,
+            'color': DEFAULT_THEME.text_primary,
+            'border': f'1px solid {DEFAULT_THEME.border_default}',
         },
         style_header={
-            'backgroundColor': '#f8f9fa',
+            'backgroundColor': DEFAULT_THEME.bg_secondary,
             'fontWeight': 'bold',
-            'border': '1px solid #dee2e6',
-        },
-        style_data={
-            'border': '1px solid #dee2e6',
+            'color': DEFAULT_THEME.text_primary,
+            'border': f'1px solid {DEFAULT_THEME.border_default}',
         },
         style_data_conditional=[
             {
                 'if': {'filter_query': '{side} = "BUY"'},
-                'color': '#2ca02c',
+                'color': DEFAULT_THEME.success,
                 'fontWeight': 'bold',
             },
             {
                 'if': {'filter_query': '{side} = "SELL"'},
-                'color': '#d62728',
+                'color': DEFAULT_THEME.danger,
                 'fontWeight': 'bold',
             },
             {
                 'if': {'filter_query': '{pnl} contains "+"'},
-                'color': '#2ca02c',
+                'color': DEFAULT_THEME.success,
             },
             {
                 'if': {'filter_query': '{pnl} contains "-"'},
-                'color': '#d62728',
+                'color': DEFAULT_THEME.danger,
             },
             {
                 'if': {'filter_query': '{status} = "Open"'},
-                'backgroundColor': '#fff3cd',
+                'backgroundColor': DEFAULT_THEME.bg_secondary,
             },
         ],
         sort_action='native',
         filter_action='native',
         page_size=20,
+        id='trade-journal-table',
     )
+
+    # Filter dropdowns
+    symbol_options = [{'label': s, 'value': s} for s in symbols if s]
+    reason_options = [{'label': _format_reason(r), 'value': r} for r in reasons if r]
 
     return html.Div([
         html.H4("Trade Journal", style={'marginBottom': '10px'}),
@@ -122,19 +136,19 @@ def create_trade_journal_table(
             html.Div([
                 dcc.Dropdown(
                     id='trade-symbol-filter',
-                    options=[{'label': s, 'value': s} for s in sorted(set(t.get('symbol', '') for t in trades))],
+                    options=symbol_options,
                     placeholder="Filter by symbol",
-                    style={'width': '200px', 'marginRight': '10px'}
+                    style={'width': '200px', 'marginRight': '10px'},
                 ),
                 dcc.Dropdown(
                     id='trade-reason-filter',
-                    options=[{'label': _format_reason(r), 'value': r} for r in sorted(set(t.get('reason', '') for t in trades))],
+                    options=reason_options,
                     placeholder="Filter by reason",
-                    style={'width': '200px'}
+                    style={'width': '200px'},
                 ),
-            ], style={'display': 'flex', 'marginTop': '10px'})
+            ], style={'display': 'flex', 'marginTop': '10px'}),
         ]),
-        table
+        table,
     ], className="trade-journal")
 
 
@@ -208,5 +222,5 @@ def create_trade_statistics(trades: List[Dict[str, Any]]) -> html.Div:
         html.Table([
             html.Tr([html.Td(s[0], style={'padding': '5px'}), html.Td(str(s[1]), style={'padding': '5px', 'fontWeight': 'bold'})])
             for s in stats
-        ], style={'width': '100%', 'fontSize': '14px'})
+        ], style={'width': '100%', 'fontSize': '14px'}),
     ], className="trade-statistics", style={'marginTop': '20px'})

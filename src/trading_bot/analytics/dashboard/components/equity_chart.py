@@ -6,15 +6,18 @@ Portfolio value over time vs benchmark.
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import Dict, Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import create_figure, apply_dark_theme
 
 
 def create_equity_chart(
     equity_data: pd.DataFrame,
     initial_capital: float = 10000.0,
-    title: str = "Portfolio Value vs Benchmark"
+    title: str = "Portfolio Value vs Benchmark",
 ) -> go.Figure:
     """
     Create equity curve chart comparing portfolio vs benchmark.
@@ -35,7 +38,7 @@ def create_equity_chart(
         shared_xaxes=True,
         vertical_spacing=0.03,
         row_heights=[0.7, 0.3],
-        subplot_titles=('Portfolio Value ($)', 'Daily Returns')
+        subplot_titles=('Portfolio Value ($)', 'Monthly Returns'),
     )
 
     # Equity curve
@@ -48,10 +51,10 @@ def create_equity_chart(
             x=dates,
             y=equity,
             name="Portfolio",
-            line=dict(color="#4da6ff", width=2.5),
-            hovertemplate='Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>'
+            line=dict(color=DEFAULT_THEME.primary, width=2.5),
+            hovertemplate='Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>',
         ),
-        row=1, col=1
+        row=1, col=1,
     )
 
     fig.add_trace(
@@ -59,64 +62,74 @@ def create_equity_chart(
             x=dates,
             y=benchmark,
             name="Benchmark (SPY)",
-            line=dict(color="#4cd964", width=2.5, dash='dash'),
-            hovertemplate='Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>'
+            line=dict(color=DEFAULT_THEME.success, width=2.5, dash='dash'),
+            hovertemplate='Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>',
         ),
-        row=1, col=1
+        row=1, col=1,
     )
 
-    # Daily returns heatmap
-    if 'daily_return' in equity_data.columns:
-        daily_returns = equity_data['daily_return'].fillna(0)
-        monthly_returns = _get_monthly_returns(daily_returns)
+    # Monthly returns heatmap
+    if 'equity' in equity_data.columns:
+        # Use equity values to calculate monthly returns
+        monthly_data = _get_monthly_returns(equity_data['equity'])
 
         fig.add_trace(
             go.Heatmap(
-                z=monthly_returns['values'].T,
-                x=monthly_returns['years'],
-                y=monthly_returns['months'],
+                z=monthly_data['values'].T,
+                x=monthly_data['years'],
+                y=monthly_data['months'],
                 colorscale=[
-                    [0.0, '#d62728'],
-                    [0.49, '#d62728'],
-                    [0.5, '#ffdd00'],
-                    [0.51, '#2ca02c'],
-                    [1.0, '#2ca02c']
+                    [0.0, DEFAULT_THEME.danger],
+                    [0.49, DEFAULT_THEME.danger],
+                    [0.5, DEFAULT_THEME.warning],
+                    [0.51, DEFAULT_THEME.success],
+                    [1.0, DEFAULT_THEME.success],
                 ],
                 zmid=0,
                 hovertemplate='Month: %{y} %{x}<br>Return: %{z:.1%}<extra></extra>',
                 showscale=True,
-                colorbar=dict(title='Return', thickness=10)
+                colorbar=dict(title='Return', thickness=10),
             ),
-            row=2, col=1
+            row=2, col=1,
         )
 
     fig.update_layout(
-        title=dict(text=title, font=dict(size=20, color='#ffffff')),
+        title=dict(text=title, font=dict(size=20, color=DEFAULT_THEME.text_primary)),
         height=600,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         hovermode='x unified',
         showlegend=True,
-        plot_bgcolor='#0a0a0a',
-        paper_bgcolor='#0a0a0a',
-        font=dict(color='#ffffff'),
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
+        font=dict(color=DEFAULT_THEME.text_primary),
     )
 
-    fig.update_yaxes(title_text='Portfolio Value ($)', row=1, col=1, tickformat='$,.0f', gridcolor='#404040', tickcolor='#404040')
-    fig.update_yaxes(title_text='Return', row=2, col=1, tickformat='.0%', gridcolor='#404040', tickcolor='#404040')
-    fig.update_xaxes(gridcolor='#404040', tickcolor='#404040')
+    fig.update_yaxes(title_text='Portfolio Value ($)', row=1, col=1, tickformat='$,.0f', gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default)
+    fig.update_yaxes(title_text='Return', row=2, col=1, tickformat='.0%', gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default)
+    fig.update_xaxes(gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default)
 
     return fig
 
 
-def _get_monthly_returns(cumulative: pd.Series) -> Dict:
-    """Calculate monthly returns for heatmap."""
-    returns = cumulative.pct_change().fillna(0)
+def _get_monthly_returns(equity: pd.Series) -> Dict:
+    """
+    Calculate monthly returns for heatmap.
 
-    monthly = returns.resample('ME').sum()
+    Args:
+        equity: Series of portfolio values (not cumulative returns)
+
+    Returns:
+        Dict with values matrix, years list, and month labels
+    """
+    # Resample to month-end values
+    monthly_equity = equity.resample('ME').last()
+
+    # Calculate monthly returns as pct change of month-end values
+    monthly_returns = monthly_equity.pct_change().fillna(0)
 
     df = pd.DataFrame({
-        'date': monthly.index,
-        'return': monthly.values
+        'date': monthly_returns.index,
+        'return': monthly_returns.values,
     })
     df['year'] = df['date'].dt.year
     df['month'] = df['date'].dt.month
@@ -129,13 +142,13 @@ def _get_monthly_returns(cumulative: pd.Series) -> Dict:
     return {
         'values': pivot.values,
         'years': [str(y) for y in pivot.index],
-        'months': [month_labels[m-1] for m in pivot.columns]
+        'months': [month_labels[m-1] for m in pivot.columns],
     }
 
 
 def create_drawdown_chart(
     drawdown_data: pd.Series,
-    title: str = "Drawdown Analysis"
+    title: str = "Drawdown Analysis",
 ) -> go.Figure:
     """
     Create drawdown chart.
@@ -158,10 +171,10 @@ def create_drawdown_chart(
             y=drawdown_data,
             name='Drawdown',
             fill='tozeroy',
-            fillcolor='rgba(214, 39, 40, 0.3)',
-            line=dict(color='#d62728', width=1),
-            hovertemplate='Date: %{x}<br>Drawdown: %{y:.1%}<extra></extra>'
-        )
+            fillcolor=f'{DEFAULT_THEME.danger}4d',  # 30% opacity
+            line=dict(color=DEFAULT_THEME.danger, width=1),
+            hovertemplate='Date: %{x}<br>Drawdown: %{y:.1%}<extra></extra>',
+        ),
     )
 
     # Mark max drawdown
@@ -173,10 +186,10 @@ def create_drawdown_chart(
             x=[max_dd_idx],
             y=[max_dd],
             mode='markers',
-            marker=dict(size=10, color='#d62728', symbol='circle'),
+            marker=dict(size=10, color=DEFAULT_THEME.danger, symbol='circle'),
             name=f'Max Drawdown: {max_dd:.1%}',
-            hovertemplate='Max DD: {y:.1%}<extra></extra>'
-        )
+            hovertemplate='Max DD: {y:.1%}<extra></extra>',
+        ),
     )
 
     fig.update_layout(
@@ -184,11 +197,11 @@ def create_drawdown_chart(
         height=300,
         hovermode='x unified',
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        yaxis=dict(tickformat='.0%', gridcolor='#eee'),
-        xaxis=dict(gridcolor='#eee'),
+        yaxis=dict(tickformat='.0%', gridcolor=DEFAULT_THEME.border_default),
+        xaxis=dict(gridcolor=DEFAULT_THEME.border_default),
     )
 
     return fig
@@ -202,12 +215,12 @@ def _empty_figure(message: str) -> go.Figure:
         xref="paper", yref="paper",
         x=0.5, y=0.5,
         showarrow=False,
-        font=dict(size=16, color="gray")
+        font=dict(size=16, color=DEFAULT_THEME.text_secondary),
     )
     fig.update_layout(
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         height=300,
     )
     return fig

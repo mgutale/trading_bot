@@ -6,9 +6,8 @@ Enhanced data structures for the analytics dashboard.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Optional
+from typing import Optional, List, Dict, Any
 from enum import Enum
-from collections import defaultdict
 
 
 class TradeReason(Enum):
@@ -172,30 +171,28 @@ class RegimePerformance:
 
 @dataclass
 class AttributionEntry:
-    """Stock-level attribution data."""
+    """Stock-level attribution data with comprehensive performance metrics."""
     symbol: str
     total_return: float
-    contribution_pct: float  # % of portfolio return
+    contribution_pct: float
     trades: int
     avg_holding_days: float
     best_trade_pct: Optional[float] = None
     worst_trade_pct: Optional[float] = None
-
-
-@dataclass
-class LiveComparisonData:
-    """Comparison between live trading and backtest expectations."""
-    live_equity: float
-    backtest_equity: float
-    live_return: float
-    backtest_return: float
-    live_daily_pnl: float
-    backtest_expected_daily: float
-    tracking_error: float
-    correlation: float
-    regime: str
-    live_positions: int
-    backtest_expected_positions: int
+    win_rate: float = 0.0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    profit_factor: float = 0.0
+    avg_win_pct: Optional[float] = None
+    avg_loss_pct: Optional[float] = None
+    largest_win_pct: Optional[float] = None
+    largest_loss_pct: Optional[float] = None
+    sharpe_ratio: float = 0.0
+    max_drawdown: float = 0.0
+    volatility: float = 0.0
+    alpha_vs_benchmark: float = 0.0
+    regime_breakdown: Dict[str, Dict] = field(default_factory=dict)
+    reason_breakdown: Dict[str, Dict] = field(default_factory=dict)
 
 
 def create_enriched_trade(

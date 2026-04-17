@@ -9,11 +9,14 @@ from typing import List, Dict, Any, Optional
 import plotly.graph_objects as go
 from dash import html, dash_table, dcc
 
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import color_for_return, empty_figure
+
 
 def create_positions_table(
     positions: List[Dict[str, Any]],
     current_prices: Dict[str, float] = None,
-    initial_capital: float = 10000.0
+    initial_capital: float = 10000.0,
 ) -> html.Div:
     """
     Create current positions display table.
@@ -31,7 +34,7 @@ def create_positions_table(
     if not positions:
         return html.Div([
             html.H4("Current Positions"),
-            html.P("No open positions", style={'color': 'gray', 'fontStyle': 'italic'})
+            html.P("No open positions", style={'color': DEFAULT_THEME.text_secondary, 'fontStyle': 'italic'}),
         ], className="positions-panel")
 
     rows = []
@@ -50,7 +53,7 @@ def create_positions_table(
         pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
         market_value = current_price * qty
 
-        pnl_color = '#2ca02c' if pnl >= 0 else '#d62728'
+        pnl_color = color_for_return(pnl)
 
         rows.append(html.Tr([
             html.Td(symbol, style={'fontWeight': 'bold'}),
@@ -58,55 +61,30 @@ def create_positions_table(
             html.Td(f"${entry_price:.2f}"),
             html.Td(f"${current_price:.2f}"),
             html.Td(f"${market_value:,.0f}"),
-            html.Td(f"${pnl:+,.2f}", style={'color': pnl_color}),
-            html.Td(f"{pnl_pct:+.2f}%", style={'color': pnl_color}),
+            html.Td(html.Span(f"${pnl:+,.2f}", style={'color': pnl_color})),
+            html.Td(html.Span(f"{pnl_pct:+.2f}%", style={'color': pnl_color})),
             html.Td(f"${stop_price:.2f}" if stop_price > 0 else "-"),
         ]))
 
-    table = dash_table.DataTable(
-        columns=[
-            {'name': 'Symbol', 'id': 'symbol'},
-            {'name': 'Qty', 'id': 'qty'},
-            {'name': 'Entry', 'id': 'entry_price'},
-            {'name': 'Current', 'id': 'current_price'},
-            {'name': 'Mkt Value', 'id': 'market_value'},
-            {'name': 'P&L', 'id': 'pnl'},
-            {'name': 'P&L %', 'id': 'pnl_pct'},
-            {'name': 'Stop', 'id': 'stop_price'},
-        ],
-        data=positions,
-        style_table={'overflowX': 'auto'},
-        style_cell={
-            'textAlign': 'center',
-            'padding': '8px',
-            'fontSize': '14px',
-        },
-        style_header={
-            'backgroundColor': '#161b22',
-            'fontWeight': 'bold',
-            'color': '#8b949e',
-            'border': '1px solid #30363d',
-        },
-        style_data={
-            'backgroundColor': '#21262d',
-            'color': '#f0f6fc',
-            'border': '1px solid #30363d',
-        },
-        style_data_conditional=[
-            {
-                'if': {'filter_query': '{pnl} > 0'},
-                'color': '#2ca02c',
-            },
-            {
-                'if': {'filter_query': '{pnl} < 0'},
-                'color': '#d62728',
-            },
-        ],
-    )
+    table = html.Table([
+        html.Thead(
+            html.Tr([
+                html.Th('Symbol'),
+                html.Th('Qty'),
+                html.Th('Entry'),
+                html.Th('Current'),
+                html.Th('Mkt Value'),
+                html.Th('P&L'),
+                html.Th('P&L %'),
+                html.Th('Stop'),
+            ])
+        ),
+        html.Tbody(rows),
+    ], className='positions-table')
 
     return html.Div([
         html.H4("Current Positions", style={'marginBottom': '10px'}),
-        table
+        table,
     ], className="positions-panel")
 
 
@@ -127,7 +105,7 @@ def create_position_summary(positions: List[Dict[str, Any]]) -> html.Div:
     total_pnl = sum(p.get('unrealized_pnl', 0) for p in positions)
     total_pnl_pct = sum(p.get('unrealized_pnl_pct', 0) for p in positions)
 
-    pnl_color = '#2ca02c' if total_pnl >= 0 else '#d62728'
+    pnl_color = color_for_return(total_pnl)
 
     return html.Div([
         html.Div([
@@ -136,7 +114,7 @@ def create_position_summary(positions: List[Dict[str, Any]]) -> html.Div:
         ]),
         html.Div([
             html.Span(f"Total P&L: ", style={'fontWeight': 'bold'}),
-            html.Span(f"${total_pnl:+,.2f} ({total_pnl_pct/len(positions):+.2f}%)", style={'color': pnl_color}),
+            html.Span(html.Span(f"${total_pnl:+,.2f} ({total_pnl_pct/len(positions):+.2f}%)", style={'color': pnl_color})),
         ]),
     ], className="position-summary", style={'marginBottom': '15px', 'fontSize': '16px'})
 
@@ -152,43 +130,26 @@ def create_positions_chart(positions: List[Dict[str, Any]]) -> go.Figure:
         Plotly Figure
     """
     if not positions:
-        return _empty_figure("No positions")
+        return empty_figure("No positions", theme=DEFAULT_THEME)
 
     labels = [p.get('symbol', 'Unknown') for p in positions]
     values = [p.get('market_value', p.get('current_price', 0) * p.get('qty', 0)) for p in positions]
 
-    colors = ['#1f77b4', '#17becf', '#2ca02c', '#ff7f0e', '#d62728', '#9467bd',
-              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22']
-
     fig = go.Figure(data=[go.Pie(
         labels=labels,
         values=values,
-        marker=dict(colors=colors[:len(labels)]),
+        marker=dict(colors=DEFAULT_THEME.chart_palette[:len(labels)]),
         textinfo='label+percent',
         hole=0.3,
     )])
 
     fig.update_layout(
-        title=dict(text="Position Allocation", font=dict(size=16, color='#ffffff')),
+        title=dict(text="Position Allocation", font=dict(size=16, color=DEFAULT_THEME.text_primary)),
         height=300,
-        plot_bgcolor='#0a0a0a',
-        paper_bgcolor='#0a0a0a',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         showlegend=True,
         legend=dict(orientation='h', yanchor='bottom', y=-0.2),
     )
 
-    return fig
-
-
-def _empty_figure(message: str) -> go.Figure:
-    """Create an empty figure with a message."""
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        xref="paper", yref="paper",
-        x=0.5, y=0.5,
-        showarrow=False,
-        font=dict(size=16, color="gray")
-    )
-    fig.update_layout(template='plotly_white', height=250)
     return fig

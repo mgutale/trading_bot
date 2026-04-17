@@ -1,0 +1,10 @@
+{
+  "momentum_short": 43,
+  "momentum_long": 176,
+  "stop_loss_pct": 0.07220897373017039,
+  "rebalance_frequency": 19,
+  "top_n_stocks": 8,
+  "optimized_date": "2026-04-17",
+  "sharpe_ratio": 1.1948791347265846,
+  "optimization_period": "2 years"
+}

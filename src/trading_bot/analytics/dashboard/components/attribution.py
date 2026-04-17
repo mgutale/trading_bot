@@ -8,6 +8,9 @@ from typing import List, Dict, Any
 from dash import html
 import plotly.graph_objects as go
 
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import create_figure, create_bar_chart, empty_figure
+
 
 def create_attribution_chart(attribution: List[Dict[str, Any]]) -> go.Figure:
     """
@@ -20,32 +23,31 @@ def create_attribution_chart(attribution: List[Dict[str, Any]]) -> go.Figure:
         Plotly Figure
     """
     if not attribution:
-        return _empty_figure("No attribution data")
+        return empty_figure("No attribution data", theme=DEFAULT_THEME)
 
     symbols = [a.get('symbol', 'Unknown') for a in attribution]
     contributions = [a.get('contribution_pct', 0) for a in attribution]
     returns = [a.get('total_return', 0) for a in attribution]
 
     # Color by return (green for positive, red for negative)
-    colors = ['#2ca02c' if r >= 0 else '#d62728' for r in returns]
+    colors = [DEFAULT_THEME.success if r >= 0 else DEFAULT_THEME.danger for r in returns]
 
-    fig = go.Figure(data=[go.Bar(
+    fig = create_bar_chart(
         x=symbols,
         y=contributions,
-        marker_color=colors,
-        text=[f'{c:.1f}%' for c in contributions],
-        textposition='outside',
-    )])
+        colors=colors,
+        title="",
+        y_suffix="%",
+    )
 
     fig.update_layout(
-        title=dict(text='Stock Contribution to Returns', font=dict(size=16, color='#ffffff')),
         height=350,
-        plot_bgcolor='#0a0a0a',
-        paper_bgcolor='#0a0a0a',
-        yaxis=dict(title='Contribution (%)', gridcolor='#404040', tickcolor='#404040'),
-        xaxis=dict(title='Symbol', gridcolor='#404040', tickcolor='#404040'),
-        showlegend=False,
+        yaxis=dict(title='Contribution (%)', gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default),
+        xaxis=dict(title='Symbol', gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default),
+        margin=dict(l=60, r=20, t=20, b=80),
     )
+
+    fig.update_xaxes(tickangle=-45)
 
     return fig
 
@@ -63,7 +65,7 @@ def create_attribution_table(attribution: List[Dict[str, Any]]) -> html.Div:
     if not attribution:
         return html.Div([
             html.H4("Stock Attribution"),
-            html.P("No attribution data", style={'color': 'gray'})
+            html.P("No attribution data", style={'color': DEFAULT_THEME.text_secondary}),
         ])
 
     rows = []
@@ -76,9 +78,11 @@ def create_attribution_table(attribution: List[Dict[str, Any]]) -> html.Div:
         best = a.get('best_trade_pct')
         worst = a.get('worst_trade_pct')
 
+        return_color = DEFAULT_THEME.success if total_return >= 0 else DEFAULT_THEME.danger
+
         rows.append(html.Tr([
             html.Td(symbol, style={'fontWeight': 'bold'}),
-            html.Td(f"${total_return:+,.2f}"),
+            html.Td(html.Span(f"${total_return:+,.2f}", style={'color': return_color})),
             html.Td(f"{contribution:.1f}%"),
             html.Td(str(trades)),
             html.Td(f"{avg_holding:.1f}d"),
@@ -98,12 +102,12 @@ def create_attribution_table(attribution: List[Dict[str, Any]]) -> html.Div:
                 html.Th('Worst'),
             ])
         ),
-        html.Tbody(rows)
-    ], className='attribution-table', style={'width': '100%', 'borderCollapse': 'collapse'})
+        html.Tbody(rows),
+    ], className='attribution-table')
 
     return html.Div([
         html.H4("Stock Attribution", style={'marginBottom': '10px'}),
-        table
+        table,
     ], className='attribution-panel')
 
 
@@ -121,7 +125,7 @@ def create_sector_allocation(positions: List[Dict[str, Any]]) -> go.Figure:
         Plotly Figure
     """
     if not positions:
-        return _empty_figure("No positions")
+        return empty_figure("No positions", theme=DEFAULT_THEME)
 
     symbols = [p.get('symbol', 'Unknown') for p in positions]
     values = [p.get('market_value', 0) for p in positions]
@@ -131,14 +135,15 @@ def create_sector_allocation(positions: List[Dict[str, Any]]) -> go.Figure:
         values=values,
         hole=0.3,
         textinfo='label+percent',
+        marker=dict(colors=DEFAULT_THEME.chart_palette[:len(symbols)]),
     )])
 
     fig.update_layout(
         title=dict(text='Portfolio Allocation', font=dict(size=16)),
         height=300,
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         showlegend=True,
         legend=dict(orientation='h', yanchor='bottom', y=-0.2),
     )
@@ -149,7 +154,7 @@ def create_sector_allocation(positions: List[Dict[str, Any]]) -> go.Figure:
 def create_returns_waterfall(
     initial_capital: float,
     final_capital: float,
-    contributions: List[Dict[str, Any]]
+    contributions: List[Dict[str, Any]],
 ) -> go.Figure:
     """
     Create a waterfall chart showing how returns accumulated.
@@ -163,7 +168,7 @@ def create_returns_waterfall(
         Plotly Figure
     """
     if not contributions:
-        return _empty_figure("No data")
+        return empty_figure("No data", theme=DEFAULT_THEME)
 
     # Build waterfall data
     symbols = [c.get('symbol', '') for c in contributions]
@@ -171,38 +176,24 @@ def create_returns_waterfall(
 
     # Add initial and final
     x_labels = ['Start'] + symbols + ['End']
-    y_values = [0] + pnl_values + [sum(pnl_values)]
+    y_values = [initial_capital] + pnl_values + [final_capital]
 
     fig = go.Figure(data=[go.Waterfall(
         x=x_labels,
         y=y_values,
-        measure=['relative'] * (len(x_labels)),
-        increasing=dict(marker=dict(color='#2ca02c')),
-        decreasing=dict(marker=dict(color='#d62728')),
-        totals=dict(marker=dict(color='#1f77b4')),
+        measure=['absolute'] + ['relative'] * len(symbols) + ['absolute'],
+        increasing=dict(marker=dict(color=DEFAULT_THEME.success)),
+        decreasing=dict(marker=dict(color=DEFAULT_THEME.danger)),
+        totals=dict(marker=dict(color=DEFAULT_THEME.primary)),
     )])
 
     fig.update_layout(
         title=dict(text='Returns Waterfall', font=dict(size=16)),
         height=400,
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         showlegend=False,
     )
 
-    return fig
-
-
-def _empty_figure(message: str) -> go.Figure:
-    """Create an empty figure with a message."""
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        xref="paper", yref="paper",
-        x=0.5, y=0.5,
-        showarrow=False,
-        font=dict(size=16, color="gray")
-    )
-    fig.update_layout(template='plotly_white', height=250)
     return fig

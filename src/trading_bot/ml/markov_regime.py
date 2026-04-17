@@ -10,6 +10,8 @@ Uses forward-only filtering (not Viterbi) for walk-forward predictions
 to avoid look-ahead bias. Viterbi is a global optimizer that assigns
 states using future data within each prediction window, inflating
 regime detection accuracy in backtests.
+
+Multivariate HMM: Uses both returns AND volatility for better regime separation.
 """
 
 import logging
@@ -32,6 +34,8 @@ class MarkovRegimeDetector:
     Uses walk-forward training to avoid look-ahead bias.
 
     Supports model persistence to maintain consistent regime labels across runs.
+
+    Multivariate HMM: Uses both returns AND volatility for better regime separation.
     """
 
     # Fixed regime labels for 4-state HMM
@@ -48,28 +52,55 @@ class MarkovRegimeDetector:
         n_states: int = 4,
         min_training_days: int = 63,
         retrain_frequency: int = 21,
-        random_state: int = 42
+        random_state: int = 42,
+        vol_window: int = 21,
+        use_volatility: bool = True
     ):
         self.n_states = n_states
         self.min_training_days = min_training_days
         self.retrain_frequency = retrain_frequency
         self.random_state = random_state
+        self.vol_window = vol_window  # Rolling volatility window
+        self.use_volatility = use_volatility  # Use multivariate HMM
         self.model: Optional[hmm.GaussianHMM] = None
         self._fitted = False
         self._state_labels: Dict[int, str] = {}  # State number -> label mapping
         self._state_means: Dict[int, float] = {}  # State number -> mean return
+        self._state_stds: Dict[int, float] = {}  # State number -> volatility
 
     def fit(self, data: pd.DataFrame) -> "MarkovRegimeDetector":
-        """Fit HMM to data with convergence retries."""
-        returns = data['close'].pct_change().dropna().values.reshape(-1, 1)
+        """Fit HMM to data with convergence retries.
+
+        Uses multivariate features (returns + volatility) if use_volatility=True.
+        """
+        # Set numpy seed for reproducibility
+        np.random.seed(self.random_state)
+
+        returns = data['close'].pct_change().dropna()
 
         if len(returns) < self.min_training_days:
             raise ValueError(f"Need at least {self.min_training_days} days of data")
 
-        # Try multiple random seeds for convergence
+        # Prepare features
+        if self.use_volatility:
+            # Calculate rolling volatility
+            rolling_vol = returns.rolling(self.vol_window).std() * np.sqrt(252)
+            # Create multivariate features: [return, volatility]
+            features = pd.DataFrame({
+                'return': returns,
+                'vol': rolling_vol
+            }).dropna()
+            X = features.values
+        else:
+            X = returns.values.reshape(-1, 1)
+
+        # Try multiple random seeds and select best model by BIC (deterministic)
+        best_model = None
+        best_bic = float('inf')
+
         for attempt in range(5):
             try:
-                self.model = hmm.GaussianHMM(
+                candidate = hmm.GaussianHMM(
                     n_components=self.n_states,
                     covariance_type="diag",
                     n_iter=2000,
@@ -78,14 +109,20 @@ class MarkovRegimeDetector:
                     params="stmc",
                     tol=1e-4,
                 )
-                self.model.fit(returns)
+                candidate.fit(X)
                 # Verify the model has valid parameters
-                if not np.isnan(self.model.means_).any() and not np.isnan(self.model.transmat_).any():
-                    self._fitted = True
-                    return self
-                logger.warning(f"Fit attempt {attempt+1} produced NaN parameters, retrying")
+                if not np.isnan(candidate.means_).any() and not np.isnan(candidate.transmat_).any():
+                    bic = candidate.bic(X)
+                    if bic < best_bic:
+                        best_model = candidate
+                        best_bic = bic
             except Exception as e:
-                logger.warning(f"Fit attempt {attempt+1} failed: {e}")
+                logger.debug(f"Fit attempt {attempt+1} failed: {e}")
+
+        if best_model is not None:
+            self.model = best_model
+            self._fitted = True
+            return self
 
         # Last resort: fit with default params
         logger.warning("All fit attempts failed, using fallback configuration")
@@ -98,20 +135,35 @@ class MarkovRegimeDetector:
             params="stmc",
             tol=1e-2,
         )
-        self.model.fit(returns)
+        self.model.fit(X)
         self._fitted = True
         return self
 
     def predict(self, data: pd.DataFrame) -> pd.Series:
-        """Predict regimes for all data points."""
+        """Predict regimes for all data points.
+
+        Uses multivariate features (returns + volatility) if use_volatility=True.
+        """
         if not self._fitted:
             raise ValueError("Model not fitted. Call fit() first.")
 
-        returns = data['close'].pct_change().dropna().values.reshape(-1, 1)
-        regimes = self.model.predict(returns)
+        returns = data['close'].pct_change().dropna()
+
+        # Prepare features matching training
+        if self.use_volatility:
+            rolling_vol = returns.rolling(self.vol_window).std() * np.sqrt(252)
+            features = pd.DataFrame({
+                'return': returns,
+                'vol': rolling_vol
+            }).dropna()
+            X = features.values
+        else:
+            X = returns.values.reshape(-1, 1)
+
+        regimes = self.model.predict(X)
 
         # Align index with original data
-        index = data.index[1:]  # Skip first due to pct_change()
+        index = features.index if self.use_volatility else returns.index
         return pd.Series(regimes, index=index, name='regime')
 
     def predict_walkforward(self, data: pd.DataFrame) -> tuple[pd.Series, Dict[int, Dict[int, float]]]:
@@ -128,12 +180,25 @@ class MarkovRegimeDetector:
         P(state_t | observations_1..t) using only past observations, which is
         what a real-time trader would have access to.
 
+        Uses multivariate features (returns + volatility) if use_volatility=True.
+
         Returns:
             tuple: (regimes Series, dict mapping date_index -> state_means for that period)
         """
+        # Set numpy seed for reproducibility
+        np.random.seed(self.random_state)
+
         returns = data['close'].pct_change().dropna()
         regimes = pd.Series(index=returns.index, dtype=int)
         state_means_by_period = {}
+
+        # Calculate rolling volatility for multivariate features
+        if self.use_volatility:
+            rolling_vol = returns.rolling(self.vol_window).std() * np.sqrt(252)
+            full_features = pd.DataFrame({
+                'return': returns,
+                'vol': rolling_vol
+            }).dropna()
 
         last_model = None  # Track last successful model for fallback
 
@@ -141,12 +206,17 @@ class MarkovRegimeDetector:
         train_end = self.min_training_days
         while train_end < len(returns):
             # Train on historical data only (expanding window)
-            train_data = returns.iloc[:train_end].values.reshape(-1, 1)
+            if self.use_volatility:
+                # Use features up to train_end
+                train_features = full_features.iloc[:train_end]
+                train_data = train_features.values
+            else:
+                train_data = returns.iloc[:train_end].values.reshape(-1, 1)
 
             model = None
-            fit_success = False
+            best_bic = float('inf')
 
-            # Try multiple random seeds for convergence
+            # Try multiple random seeds and select best by BIC (deterministic)
             for attempt in range(3):
                 try:
                     candidate = hmm.GaussianHMM(
@@ -164,13 +234,14 @@ class MarkovRegimeDetector:
                     if (not np.isnan(candidate.means_).any() and
                         not np.isnan(candidate.transmat_).any() and
                         np.all(candidate.transmat_.sum(axis=1) > 0.99)):
-                        model = candidate
-                        fit_success = True
-                        break
+                        bic = candidate.bic(train_data)
+                        if bic < best_bic:
+                            model = candidate
+                            best_bic = bic
                 except Exception as e:
                     logger.debug(f"HMM attempt {attempt+1} failed for window {train_end}: {e}")
 
-            if fit_success and model is not None:
+            if model is not None:
                 last_model = model
 
                 # Store state means for this period's model
@@ -206,6 +277,10 @@ class MarkovRegimeDetector:
                 logger.warning(f"No model available for window ending at {train_end}")
 
             train_end += self.retrain_frequency
+
+        # Label regimes based on realized statistics
+        # _label_regimes will also store model characteristics in _state_means/_state_stds
+        self._label_regimes(regimes, data)
 
         return regimes, state_means_by_period
 
@@ -263,17 +338,20 @@ class MarkovRegimeDetector:
         benchmark_data: pd.DataFrame
     ) -> Dict[int, str]:
         """
-        Create consistent state labels based on HMM state means.
+        Create consistent state labels based on HMM state characteristics.
 
-        Returns dict mapping state number to label:
-        {0: 'strong_bull', 1: 'weak_bull', 2: 'weak_bear', 3: 'strong_bear'}
+        Uses both mean return AND volatility for quadrant-based labeling:
+        - High mean + low vol = strong_bull
+        - High mean + high vol = weak_bull
+        - Low mean + high vol = strong_bear
+        - Low mean + low vol = weak_bear
 
-        Labels are assigned by ranking states by their mean returns.
+        Returns dict mapping state number to label.
         """
         returns = benchmark_data['close'].pct_change().dropna()
         returns = returns.reindex(regimes_numeric.index).fillna(0)
 
-        # Calculate mean return for each state
+        # Calculate both mean return and volatility for each state
         stats = {}
         valid_regimes = regimes_numeric.dropna()
         valid_returns = returns.loc[valid_regimes.index]
@@ -281,26 +359,57 @@ class MarkovRegimeDetector:
         for state in range(self.n_states):
             mask = valid_regimes == state
             if mask.sum() > 0:
-                stats[state] = valid_returns.loc[mask].mean()
+                state_returns = valid_returns.loc[mask]
+                stats[state] = {
+                    'mean': state_returns.mean(),
+                    'vol': state_returns.std(),
+                    'count': mask.sum()
+                }
             else:
-                stats[state] = 0.0
+                stats[state] = {'mean': 0.0, 'vol': 0.0, 'count': 0}
 
-        # Rank states by return and assign labels
-        sorted_states = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+        # Store state characteristics for reference
+        self._state_means = {s: stats[s]['mean'] for s in stats}
+        self._state_stds = {s: stats[s]['vol'] for s in stats}
+
+        # Quadrant-based labeling: rank by mean and vol separately
+        # High mean = bull, Low mean = bear
+        # Low vol = strong, High vol = weak
+        mean_returns = [stats[s]['mean'] for s in range(self.n_states)]
+        volatilities = [stats[s]['vol'] for s in range(self.n_states)]
+
+        # Rank states by mean (descending) and vol (ascending = "strong")
+        mean_rank = sorted(range(self.n_states), key=lambda s: stats[s]['mean'], reverse=True)
+        vol_rank = sorted(range(self.n_states), key=lambda s: stats[s]['vol'])
 
         labels = {}
-        if len(sorted_states) == 4:
-            labels[sorted_states[0][0]] = 'strong_bull'
-            labels[sorted_states[1][0]] = 'weak_bull'
-            labels[sorted_states[2][0]] = 'weak_bear'
-            labels[sorted_states[3][0]] = 'strong_bear'
-        elif len(sorted_states) == 3:
-            labels[sorted_states[0][0]] = 'bull'
-            labels[sorted_states[-1][0]] = 'bear'
-            labels[sorted_states[1][0]] = 'neutral'
-        else:
-            labels[sorted_states[0][0]] = 'neutral'
+        if self.n_states == 4:
+            # Assign labels based on quadrant position
+            # Bull states (top 2 by mean)
+            bull_states = mean_rank[:2]
+            # Bear states (bottom 2 by mean)
+            bear_states = mean_rank[2:]
 
+            # Among bull states, lower vol = strong_bull, higher vol = weak_bull
+            bull_by_vol = sorted(bull_states, key=lambda s: stats[s]['vol'])
+            labels[bull_by_vol[0]] = 'strong_bull'
+            labels[bull_by_vol[1]] = 'weak_bull'
+
+            # Among bear states, lower vol = weak_bear, higher vol = strong_bear
+            bear_by_vol = sorted(bear_states, key=lambda s: stats[s]['vol'])
+            labels[bear_by_vol[0]] = 'weak_bear'
+            labels[bear_by_vol[1]] = 'strong_bear'
+
+        elif self.n_states == 3:
+            # Simplified 3-state labeling
+            labels[mean_rank[0]] = 'bull'
+            labels[mean_rank[-1]] = 'bear'
+            labels[mean_rank[1]] = 'neutral'
+        else:
+            labels[mean_rank[0]] = 'neutral'
+
+        # Store the label mapping
+        self._state_labels = labels
         return labels
 
     def save(self, path: str) -> bool:

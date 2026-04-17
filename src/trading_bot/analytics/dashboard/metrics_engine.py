@@ -2,23 +2,22 @@
 Metrics Engine
 
 Computes all analytics metrics from enriched trades and signals.
-Handles both backtest results (static data) and live trading (incremental updates).
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 import logging
 
 from trading_bot.analytics.dashboard.models import (
-    EnrichedTrade,
-    PortfolioSnapshot,
-    PerformanceStats,
-    RiskMetrics,
-    RegimePerformance,
     AttributionEntry,
-    LiveComparisonData,
+    EnrichedTrade,
+    PerformanceStats,
+    PortfolioSnapshot,
+    RegimePerformance,
+    RiskMetrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +77,12 @@ class MetricsEngine:
 
         # Basic metrics
         total_return = float(self._cumulative.iloc[-1]) if len(self._cumulative) > 0 else 0.0
-        annualized_return = float(returns.mean() * 252) if len(returns) > 0 else 0.0
+        # Annualized return using geometric compounding: (1 + total_return)^(252/n_days) - 1
+        n_days = len(returns)
+        if n_days > 0 and total_return > -1:
+            annualized_return = float((1 + total_return) ** (252 / n_days) - 1)
+        else:
+            annualized_return = 0.0
         volatility = float(returns.std() * np.sqrt(252)) if len(returns) > 0 else 0.0
 
         # Risk-adjusted metrics
@@ -355,6 +359,214 @@ class MetricsEngine:
         # Sort by contribution descending
         attribution.sort(key=lambda x: abs(x.contribution_pct), reverse=True)
         return attribution
+
+    def get_stock_performance(self, symbol: str) -> Optional[AttributionEntry]:
+        """
+        Calculate comprehensive performance metrics for a single stock.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            AttributionEntry with full metrics, or None if no trades found
+        """
+        if not self.enriched_trades:
+            return None
+
+        # Filter trades for this symbol
+        stock_trades = [t for t in self.enriched_trades if t.symbol == symbol]
+        if not stock_trades:
+            return None
+
+        closed_trades = [t for t in stock_trades if t.is_closed and t.realized_pnl is not None]
+        if not closed_trades:
+            # Only open positions
+            return AttributionEntry(
+                symbol=symbol,
+                total_return=sum(t.unrealized_pnl for t in stock_trades),
+                contribution_pct=0.0,
+                trades=len(stock_trades),
+                avg_holding_days=0.0,
+            )
+
+        # Win/loss analysis
+        winning_trades = [t for t in closed_trades if (t.realized_pnl or 0) > 0]
+        losing_trades = [t for t in closed_trades if (t.realized_pnl or 0) <= 0]
+
+        total_pnl = sum(t.realized_pnl for t in closed_trades)
+        gross_profit = sum(t.realized_pnl for t in winning_trades) if winning_trades else 0.0
+        gross_loss = abs(sum(t.realized_pnl for t in losing_trades)) if losing_trades else 0.0
+
+        win_pcts = [t.realized_pnl_pct for t in winning_trades if t.realized_pnl_pct is not None]
+        loss_pcts = [t.realized_pnl_pct for t in losing_trades if t.realized_pnl_pct is not None]
+
+        # Calculate Sharpe ratio for this stock
+        stock_returns = pd.Series([t.realized_pnl_pct for t in closed_trades if t.realized_pnl_pct is not None])
+        if len(stock_returns) > 1 and stock_returns.std() > 0:
+            sharpe = (stock_returns.mean() * 252) / (stock_returns.std() * np.sqrt(252))
+        else:
+            sharpe = 0.0
+
+        # Calculate max drawdown for this stock
+        if len(stock_returns) > 0:
+            cumulative = (1 + stock_returns).cumprod()
+            rolling_max = cumulative.expanding().max()
+            drawdowns = cumulative / rolling_max - 1
+            max_dd = float(drawdowns.min()) if len(drawdowns) > 0 else 0.0
+        else:
+            max_dd = 0.0
+
+        # Volatility
+        volatility = float(stock_returns.std() * np.sqrt(252)) if len(stock_returns) > 0 else 0.0
+
+        # Alpha vs benchmark
+        alphas = []
+        for t in closed_trades:
+            if t.realized_pnl_pct is not None and t.benchmark_return is not None:
+                alphas.append(t.realized_pnl_pct - t.benchmark_return)
+        alpha = float(np.mean(alphas)) if alphas else 0.0
+
+        # Regime breakdown
+        regime_breakdown = {}
+        for regime in ['strong_bull', 'weak_bull', 'weak_bear', 'strong_bear']:
+            regime_trades = [t for t in closed_trades if t.regime_at_entry == regime]
+            if regime_trades:
+                regime_wins = [t for t in regime_trades if (t.realized_pnl or 0) > 0]
+                regime_pnls = [t.realized_pnl for t in regime_trades if t.realized_pnl is not None]
+                regime_breakdown[regime] = {
+                    'trades': len(regime_trades),
+                    'wins': len(regime_wins),
+                    'win_rate': len(regime_wins) / len(regime_trades) if regime_trades else 0.0,
+                    'total_pnl': sum(regime_pnls) if regime_pnls else 0.0,
+                    'avg_return': float(np.mean(regime_pnls)) if regime_pnls else 0.0,
+                }
+
+        # Reason breakdown
+        reason_breakdown = {}
+        for reason in ['stop_loss', 'rebalance', 'regime_exit', 'take_profit', 'momentum']:
+            reason_trades = [t for t in closed_trades if t.reason == reason]
+            if reason_trades:
+                reason_wins = [t for t in reason_trades if (t.realized_pnl or 0) > 0]
+                reason_pnls = [t.realized_pnl for t in reason_trades if t.realized_pnl is not None]
+                reason_breakdown[reason] = {
+                    'trades': len(reason_trades),
+                    'wins': len(reason_wins),
+                    'win_rate': len(reason_wins) / len(reason_trades) if reason_trades else 0.0,
+                    'total_pnl': sum(reason_pnls) if reason_pnls else 0.0,
+                }
+
+        # Total P&L for contribution calculation
+        total_portfolio_pnl = sum(
+            t.realized_pnl for t in self.enriched_trades
+            if t.is_closed and t.realized_pnl is not None
+        )
+        if total_portfolio_pnl == 0:
+            total_portfolio_pnl = 1.0
+
+        holdings = [t.holding_period_days for t in stock_trades if t.holding_period_days is not None]
+        trade_pcts = [t.realized_pnl_pct for t in closed_trades if t.realized_pnl_pct is not None]
+
+        return AttributionEntry(
+            symbol=symbol,
+            total_return=total_pnl,
+            contribution_pct=total_pnl / total_portfolio_pnl * 100,
+            trades=len(stock_trades),
+            avg_holding_days=float(np.mean(holdings)) if holdings else 0.0,
+            best_trade_pct=max(trade_pcts) if trade_pcts else None,
+            worst_trade_pct=min(trade_pcts) if trade_pcts else None,
+            # Win/loss stats
+            win_rate=len(winning_trades) / len(closed_trades) if closed_trades else 0.0,
+            winning_trades=len(winning_trades),
+            losing_trades=len(losing_trades),
+            profit_factor=gross_profit / gross_loss if gross_loss > 0 else float('inf') if gross_profit > 0 else 0.0,
+            avg_win_pct=float(np.mean(win_pcts)) if win_pcts else None,
+            avg_loss_pct=float(np.mean(loss_pcts)) if loss_pcts else None,
+            largest_win_pct=max(win_pcts) if win_pcts else None,
+            largest_loss_pct=min(loss_pcts) if loss_pcts else None,
+            # Risk metrics
+            sharpe_ratio=sharpe,
+            max_drawdown=max_dd,
+            volatility=volatility,
+            # Alpha
+            alpha_vs_benchmark=alpha,
+            # Breakdowns
+            regime_breakdown=regime_breakdown,
+            reason_breakdown=reason_breakdown,
+        )
+
+    def get_all_stock_performance(self) -> List[AttributionEntry]:
+        """
+        Get comprehensive performance for all stocks.
+
+        Returns:
+            List of AttributionEntry sorted by contribution percentage (descending)
+        """
+        if not self.enriched_trades:
+            return []
+
+        # Get unique symbols
+        symbols = set(t.symbol for t in self.enriched_trades)
+        performances = []
+
+        for symbol in symbols:
+            perf = self.get_stock_performance(symbol)
+            if perf is not None:
+                performances.append(perf)
+
+        # Sort by absolute contribution descending
+        performances.sort(key=lambda x: abs(x.contribution_pct), reverse=True)
+        return performances
+
+    def get_regime_stock_matrix(self) -> pd.DataFrame:
+        """
+        Generate a matrix of stock returns by regime.
+
+        Returns:
+            DataFrame with stocks as rows, regimes as columns, values = average returns
+        """
+        if not self.enriched_trades:
+            return pd.DataFrame()
+
+        # Collect data
+        data = []
+        for trade in self.enriched_trades:
+            if trade.is_closed and trade.realized_pnl_pct is not None:
+                data.append({
+                    'symbol': trade.symbol,
+                    'regime': trade.regime_at_entry,
+                    'return': trade.realized_pnl_pct,
+                })
+
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        # Pivot to create matrix
+        matrix = df.pivot_table(
+            values='return',
+            index='symbol',
+            columns='regime',
+            aggfunc='mean',
+            fill_value=0.0
+        )
+
+        return matrix
+
+    def get_stock_rankings_history(self) -> pd.DataFrame:
+        """
+        Track how stock rankings changed over time.
+
+        Returns:
+            DataFrame with date, symbol, rank, momentum_score columns
+        """
+        if not self.signals or 'momentum_scores' not in self.signals.columns:
+            return pd.DataFrame()
+
+        # Extract momentum scores over time if available
+        # This requires momentum_scores to be stored in signals during backtest
+        # For now, return empty DataFrame as placeholder
+        return pd.DataFrame()
 
     def get_equity_curve(self) -> pd.DataFrame:
         """

@@ -11,6 +11,9 @@ from datetime import datetime
 import plotly.graph_objects as go
 from dash import html
 
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import empty_figure
+
 
 def create_regime_display(
     current_regime: str = 'unknown',
@@ -18,7 +21,7 @@ def create_regime_display(
     regime_duration_days: int = 0,
     exposure: float = 1.0,
     regime_history: pd.Series = None,
-    title: str = "Market Regime"
+    title: str = "Market Regime",
 ) -> html.Div:
     """
     Create current regime display with exposure indicator.
@@ -34,23 +37,8 @@ def create_regime_display(
     Returns:
         Dash HTML component
     """
-    regime_colors = {
-        'strong_bull': '#006400',  # Dark green
-        'weak_bull': '#2ca02c',   # Green
-        'weak_bear': '#ff7f0e',  # Orange
-        'strong_bear': '#8b0000', # Dark red
-        'unknown': '#808080',
-    }
-    regime_names = {
-        'strong_bull': 'Strong Bull',
-        'weak_bull': 'Weak Bull',
-        'weak_bear': 'Weak Bear',
-        'strong_bear': 'Strong Bear',
-        'unknown': 'Unknown',
-    }
-
-    color = regime_colors.get(current_regime, '#808080')
-    name = regime_names.get(current_regime, 'Unknown')
+    color = DEFAULT_THEME.regime_colors.get(current_regime, DEFAULT_THEME.text_secondary)
+    name = _format_regime_name(current_regime)
 
     # Exposure bar
     exposure_pct = int(exposure * 100) if exposure else 0
@@ -77,17 +65,17 @@ def create_regime_display(
                         'width': f'{exposure_pct}%',
                         'backgroundColor': color,
                         'height': '20px',
-                        'borderRadius': '5px',
+                        'borderRadius': DEFAULT_THEME.radius_sm,
                         'transition': 'width 0.3s ease',
                     }
                 ),
             ], style={
-                'backgroundColor': '#e9ecef',
-                'borderRadius': '5px',
+                'backgroundColor': DEFAULT_THEME.bg_secondary,
+                'borderRadius': DEFAULT_THEME.radius_sm,
                 'width': '100%',
                 'height': '20px',
             }),
-        ], className="regime-display-card")
+        ], className="regime-display-card"),
     ], className="regime-display")
 
 
@@ -102,17 +90,9 @@ def create_regime_chart(regime_history: pd.Series) -> go.Figure:
         Plotly Figure
     """
     if regime_history is None or len(regime_history) == 0:
-        return _empty_figure("No regime data")
+        return empty_figure("No regime data", theme=DEFAULT_THEME)
 
-    regime_map = {'strong_bear': 0, 'weak_bear': 1, 'weak_bull': 2, 'strong_bull': 3}
     numeric_map = {'strong_bull': 3, 'weak_bull': 2, 'weak_bear': 1, 'strong_bear': 0}
-
-    regime_colors = {
-        0: '#8b0000',  # Dark red
-        1: '#ff7f0e',  # Orange
-        2: '#2ca02c',  # Green
-        3: '#006400',  # Dark green
-    }
     regime_names = {0: 'Strong Bear', 1: 'Weak Bear', 2: 'Weak Bull', 3: 'Strong Bull'}
 
     regimes_numeric = regime_history.map(lambda x: numeric_map.get(x, 1))
@@ -148,33 +128,33 @@ def create_regime_chart(regime_history: pd.Series) -> go.Figure:
                     x=[x_start, x_end],
                     y=[y_val, y_val],
                     mode='lines',
-                    line=dict(color=regime_colors[regime_num], width=12),
+                    line=dict(color=DEFAULT_THEME.regime_colors.get(list(numeric_map.keys())[regime_num], DEFAULT_THEME.text_secondary), width=12),
                     name=regime_names[regime_num],
                     legendgroup=regime_names[regime_num],
                     showlegend=(idx == 0),
-                    hovertemplate=f'Regime: {regime_names[regime_num]}<br>From: {x_start.strftime("%Y-%m-%d")}<br>To: {x_end.strftime("%Y-%m-%d")}<extra></extra>'
-                )
+                    hovertemplate=f'Regime: {regime_names[regime_num]}<br>From: {x_start.strftime("%Y-%m-%d")}<br>To: {x_end.strftime("%Y-%m-%d")}<extra></extra>',
+                ),
             )
 
     fig.update_layout(
-        title=dict(text="Market Regime History", font=dict(size=16, color='#ffffff')),
+        title=dict(text="Market Regime History", font=dict(size=16, color=DEFAULT_THEME.text_primary)),
         height=250,
         yaxis=dict(
             range=[0.5, 4.5],
             showticklabels=True,
             tickvals=[1, 2, 3, 4],
             ticktext=['Strong Bear', 'Weak Bear', 'Weak Bull', 'Strong Bull'],
-            tickcolor='#404040',
-            gridcolor='#404040'
+            tickcolor=DEFAULT_THEME.border_default,
+            gridcolor=DEFAULT_THEME.border_default,
         ),
-        plot_bgcolor='#0a0a0a',
-        paper_bgcolor='#0a0a0a',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        xaxis=dict(gridcolor='#404040', tickcolor='#404040'),
+        xaxis=dict(gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default),
     )
 
-    fig.update_xaxes(title_text='Date', tickcolor='#404040')
-    fig.update_yaxes(title_text='Market Regime', gridcolor='#404040', tickcolor='#404040')
+    fig.update_xaxes(title_text='Date', tickcolor=DEFAULT_THEME.border_default)
+    fig.update_yaxes(title_text='Market Regime', gridcolor=DEFAULT_THEME.border_default, tickcolor=DEFAULT_THEME.border_default)
 
     return fig
 
@@ -206,26 +186,23 @@ def create_regime_summary(regime_history: pd.Series) -> html.Div:
     for regime, label in regime_labels.items():
         count = regime_counts.get(regime, 0)
         pct = count / total * 100 if total > 0 else 0
+        color = DEFAULT_THEME.regime_colors.get(regime, DEFAULT_THEME.text_secondary)
         items.append(html.Div([
-            html.Span(f"{label}: ", style={'fontWeight': 'bold'}),
+            html.Span(f"{label}: ", style={'fontWeight': 'bold', 'color': color}),
             html.Span(f"{count} days ({pct:.1f}%)"),
         ], style={'marginBottom': '5px'}))
 
     return html.Div([
         html.H4("Regime Distribution", style={'marginBottom': '10px'}),
-        html.Div(items)
+        html.Div(items),
     ], className="regime-summary")
+
+
+def _format_regime_name(regime: str) -> str:
+    """Format regime name for display."""
+    return regime.replace('_', ' ').title()
 
 
 def _empty_figure(message: str) -> go.Figure:
     """Create an empty figure with a message."""
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        xref="paper", yref="paper",
-        x=0.5, y=0.5,
-        showarrow=False,
-        font=dict(size=16, color="gray")
-    )
-    fig.update_layout(template='plotly_white', height=250)
-    return fig
+    return empty_figure(message, theme=DEFAULT_THEME)

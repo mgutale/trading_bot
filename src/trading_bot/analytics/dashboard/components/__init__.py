@@ -12,7 +12,13 @@ from .performance_stats import create_stats_cards
 from .risk_metrics import create_risk_metrics
 from .regime_breakdown import create_regime_breakdown
 from .attribution import create_attribution_chart
-from .live_comparison import create_live_comparison
+from .stock_performance import (
+    create_stock_performance_panel,
+    create_stock_detail_modal,
+    create_contribution_chart,
+    create_risk_return_scatter,
+    create_stock_metrics_table,
+)
 
 __all__ = [
     'create_equity_chart',
@@ -23,5 +29,9 @@ __all__ = [
     'create_risk_metrics',
     'create_regime_breakdown',
     'create_attribution_chart',
-    'create_live_comparison',
+    'create_stock_performance_panel',
+    'create_stock_detail_modal',
+    'create_contribution_chart',
+    'create_risk_return_scatter',
+    'create_stock_metrics_table',
 ]

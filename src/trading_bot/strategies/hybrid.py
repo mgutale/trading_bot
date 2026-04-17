@@ -54,6 +54,7 @@ class HybridHMMStopLoss(BaseStrategy):
         regime_exposure: Optional[Dict[str, float]] = None,
         universe: Optional[List[str]] = None,
         universe_method: str = "static",
+        universe_list: Optional[List[str]] = None,
         use_walkforward: bool = True,
         transaction_costs: bool = True,
         spread_pct: float = _defaults.spread_pct,
@@ -67,10 +68,17 @@ class HybridHMMStopLoss(BaseStrategy):
         self.rebalance_frequency = rebalance_frequency
         self.stop_loss_pct = stop_loss_pct
         self.position_size_pct = position_size_pct  # Max allocation per position
-        self.universe = universe or (
-            SURVIVORSHIP_ADJUSTED_UNIVERSE if universe_method == "survivorship_adjusted"
-            else TECH_UNIVERSE
-        )
+        # Use provided universe, or resolve from universe_method, or use config's universe_list
+        if universe:
+            self.universe = universe
+        elif universe_method == "survivorship_adjusted":
+            self.universe = SURVIVORSHIP_ADJUSTED_UNIVERSE
+        elif universe_method == "tech":
+            self.universe = TECH_UNIVERSE
+        else:
+            # Default: use universe_list from config (set in StrategyConfig)
+            # This allows full customization without modifying universes.py
+            self.universe = universe_list or _defaults.universe_list
         self.use_walkforward = use_walkforward
         self.transaction_costs = transaction_costs
         self.spread_pct = spread_pct
@@ -82,7 +90,8 @@ class HybridHMMStopLoss(BaseStrategy):
         self.hmm_detector = MarkovRegimeDetector(
             n_states=n_states,
             min_training_days=63,
-            retrain_frequency=21
+            retrain_frequency=rebalance_frequency,  # Use config rebalance frequency
+            use_volatility=True  # Enable multivariate HMM (returns + volatility)
         )
         self._stop_prices = {}
         self._entry_prices = {}
@@ -116,6 +125,7 @@ class HybridHMMStopLoss(BaseStrategy):
             'slippage_pct': config.slippage_pct,
             'commission_pct': config.commission_pct,
             'universe_method': config.universe_method,
+            'universe_list': config.universe_list,
         }
         params.update(overrides)
         return cls(**params)
@@ -430,9 +440,14 @@ class HybridHMMStopLoss(BaseStrategy):
                         regime_at_exit=regime,
                         price_data=price_data
                     )
-                    # Realize loss using the actual fill price
-                    actual_loss = (fill_price - entry_price) / entry_price
-                    daily_ret += actual_loss * position_weights.get(symbol, 1.0/len(active_positions))
+                    # FIX: Only book TODAY'S return (yesterday close -> fill price)
+                    # Daily returns for prior days were already booked via line 452-455.
+                    # Booking the full entry-to-exit return would double-count.
+                    prev_close = price_data[symbol].loc[
+                        price_data[symbol].index[price_data[symbol].index < idx][-1]
+                    ] if len(price_data[symbol].index[price_data[symbol].index < idx]) > 0 else entry_price
+                    today_return = (fill_price - prev_close) / prev_close
+                    daily_ret += today_return * position_weights.get(symbol, 1.0/len(active_positions))
                 else:
                     # Update trailing stop (only moves up)
                     new_stop = current_price * (1 - self.stop_loss_pct)
@@ -447,16 +462,13 @@ class HybridHMMStopLoss(BaseStrategy):
                     except (KeyError, IndexError):
                         pass  # Skip if price data unavailable for this symbol/date
 
-            # Record the daily return (calculated BEFORE any rebalancing)
-            # Scale by current exposure vs rebalance-day exposure.
-            # If rebalance happened at 100% exposure but regime now says 25%,
-            # we should have 25% of the position, not 100%. Scale accordingly.
-            # If no positions are held, scaling doesn't matter (daily_ret is 0).
-            if active_positions and rebalance_exposure > 0:
-                exposure_scale = min(exposure / rebalance_exposure, 1.0)
-            else:
-                exposure_scale = 1.0  # No positions or no prior rebalance
-            strategy_returns.append(daily_ret * exposure_scale)
+            # Record the daily return (calculated BEFORE any rebalancing).
+            # IMPORTANT: Returns are NOT scaled by exposure changes.
+            # If you hold 100% invested and regime changes to 25%, you still
+            # earned the full return on that day - you just sell 75% during
+            # the rebalance. Exposure scaling affects FUTURE returns via
+            # position_weights, not past returns.
+            strategy_returns.append(daily_ret)
 
             # Remove stopped out positions (after return calculation)
             for symbol in stopped_out:
@@ -506,41 +518,14 @@ class HybridHMMStopLoss(BaseStrategy):
                     active_positions.clear()
                     position_weights.clear()
                 else:
+                    # Determine which positions to keep vs exit
+                    positions_to_exit = old_holdings - new_holdings_set
+                    positions_to_enter = new_holdings_set - old_holdings
+                    positions_to_adjust = old_holdings & new_holdings_set
 
-                    # Remove stocks no longer in top N
-                    for symbol in list(active_positions.keys()):
-                        self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
-                        # Create enriched trade record
-                        self._create_enriched_trade(
-                            symbol=symbol,
-                            exit_date=idx,
-                            exit_price=price_data[symbol].loc[idx] if symbol in price_data else None,
-                            reason='rebalance',
-                            regime_at_exit=regime,
-                            price_data=price_data
-                        )
-                        del active_positions[symbol]
-                        del position_weights[symbol]
-
-                    # Add/update positions
-                    for symbol in new_holdings:
-                        if symbol not in active_positions and symbol in price_data:
-                            entry_price = price_data[symbol].loc[idx]
-                            active_positions[symbol] = entry_price
-                            self._stop_prices[symbol] = entry_price * (1 - self.stop_loss_pct)
-                            position_weights[symbol] = position_weights_target.get(symbol, 0.0)
-                            self._trade_log.append((idx, symbol, 'buy', 'rebalance'))
-                            # Track entry info for enriched trades
-                            self._entry_prices[symbol] = entry_price
-                            self._entry_dates[symbol] = idx
-                            self._entry_regimes[symbol] = regime
-                        elif symbol in active_positions:
-                            # Update weight for existing position (rebalancing)
-                            position_weights[symbol] = position_weights_target.get(symbol, 0)
-
-                    # Remove positions with zero weight (no longer in top N or negative momentum)
-                    for symbol in list(position_weights.keys()):
-                        if position_weights[symbol] <= 0 and symbol in active_positions:
+                    # Exit positions no longer in top N
+                    for symbol in positions_to_exit:
+                        if symbol in active_positions:
                             self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
                             self._create_enriched_trade(
                                 symbol=symbol,
@@ -552,6 +537,30 @@ class HybridHMMStopLoss(BaseStrategy):
                             )
                             del active_positions[symbol]
                             del position_weights[symbol]
+
+                    # Enter new positions
+                    for symbol in positions_to_enter:
+                        if symbol in price_data:
+                            entry_price = price_data[symbol].loc[idx]
+                            active_positions[symbol] = entry_price
+                            self._stop_prices[symbol] = entry_price * (1 - self.stop_loss_pct)
+                            position_weights[symbol] = position_weights_target.get(symbol, 0.0)
+                            self._trade_log.append((idx, symbol, 'buy', 'rebalance'))
+                            self._entry_prices[symbol] = entry_price
+                            self._entry_dates[symbol] = idx
+                            self._entry_regimes[symbol] = regime
+
+                    # Adjust weights for existing positions (only if weight changed significantly)
+                    for symbol in positions_to_adjust:
+                        old_w = old_weights.get(symbol, 0)
+                        new_w = position_weights_target.get(symbol, 0)
+                        if abs(new_w - old_w) > 0.001:  # Only trade if change > 0.1%
+                            position_weights[symbol] = new_w
+                            # Log weight adjustment (not a full trade)
+                            if new_w > old_w:
+                                self._trade_log.append((idx, symbol, 'buy', 'rebalance'))
+                            elif new_w < old_w:
+                                self._trade_log.append((idx, symbol, 'sell', 'rebalance'))
 
                     # Calculate turnover: sum of absolute weight changes / 2
                     all_symbols = old_holdings | new_holdings_set
@@ -814,8 +823,12 @@ class HybridHMMStopLoss(BaseStrategy):
             returns_for_metrics = returns
             total_return = signals['cumulative_return'].iloc[-1] if len(signals) > 0 else 0
 
-        # Basic stats
-        annualized_return = returns_for_metrics.mean() * 252
+        # Basic stats - annualized return using geometric compounding
+        n_days = len(returns_for_metrics)
+        if n_days > 0 and total_return > -1:
+            annualized_return = (1 + total_return) ** (252 / n_days) - 1
+        else:
+            annualized_return = 0.0
         volatility = returns_for_metrics.std() * np.sqrt(252)
         sharpe = annualized_return / volatility if volatility > 0 else 0
 

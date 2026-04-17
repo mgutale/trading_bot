@@ -1,13 +1,16 @@
 """
 Risk Metrics Component
 
-VaR, CVaR, volatility, and other risk指标的展示。
+VaR, CVaR, volatility, and other risk metrics display.
 """
 
 from typing import Dict, Any
 from dash import html
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+from trading_bot.analytics.dashboard.theme import DEFAULT_THEME
+from trading_bot.analytics.dashboard.chart_utils import create_figure, apply_dark_theme, empty_figure
 
 
 def create_risk_metrics(risk: Dict[str, Any]) -> html.Div:
@@ -28,22 +31,23 @@ def create_risk_metrics(risk: Dict[str, Any]) -> html.Div:
     max_dd = risk.get('max_drawdown', 0)
 
     cards = [
-        create_risk_card('VaR (95%)', f"{var_95:.2%}", '#d62728'),
-        create_risk_card('VaR (99%)', f"{var_99:.2%}", '#d62728'),
-        create_risk_card('CVaR (95%)', f"{cvar_95:.2%}", '#d62728'),
-        create_risk_card('CVaR (99%)', f"{cvar_99:.2%}", '#d62728'),
-        create_risk_card('Volatility', f"{volatility:.2%}", '#ff7f0e'),
-        create_risk_card('Max Drawdown', f"{max_dd:.2%}", '#d62728'),
+        create_risk_card('VaR (95%)', f"{var_95:.2%}", DEFAULT_THEME.danger),
+        create_risk_card('VaR (99%)', f"{var_99:.2%}", DEFAULT_THEME.danger),
+        create_risk_card('CVaR (95%)', f"{cvar_95:.2%}", DEFAULT_THEME.danger),
+        create_risk_card('CVaR (99%)', f"{cvar_99:.2%}", DEFAULT_THEME.danger),
+        create_risk_card('Volatility', f"{volatility:.2%}", DEFAULT_THEME.warning),
+        create_risk_card('Max Drawdown', f"{max_dd:.2%}", DEFAULT_THEME.danger),
     ]
 
     return html.Div([
         html.H4("Risk Metrics", style={'marginBottom': '10px'}),
-        html.Div(cards, className='risk-cards-grid')
+        html.Div(cards, className='risk-cards-grid'),
     ], className='risk-metrics')
 
 
-def create_risk_card(name: str, value: str, color: str = '#1f77b4') -> html.Div:
+def create_risk_card(name: str, value: str, color: str = None) -> html.Div:
     """Create a single risk metric card."""
+    color = color or DEFAULT_THEME.text_primary
     return html.Div([
         html.Span(name, className='risk-label'),
         html.Br(),
@@ -63,11 +67,11 @@ def create_var_chart(returns, var_confidence: float = 0.95) -> go.Figure:
         Plotly Figure
     """
     if len(returns) == 0:
-        return _empty_figure("No return data")
+        return empty_figure("No return data", theme=DEFAULT_THEME)
 
     fig = make_subplots(
         rows=1, cols=2,
-        subplot_titles=('Returns Distribution', 'VaR Analysis')
+        subplot_titles=('Returns Distribution', 'VaR Analysis'),
     )
 
     # Histogram
@@ -76,10 +80,10 @@ def create_var_chart(returns, var_confidence: float = 0.95) -> go.Figure:
             x=returns,
             nbinsx=50,
             name='Returns',
-            marker_color='#1f77b4',
-            opacity=0.7
+            marker_color=DEFAULT_THEME.primary,
+            opacity=0.7,
         ),
-        row=1, col=1
+        row=1, col=1,
     )
 
     # VaR lines
@@ -88,15 +92,15 @@ def create_var_chart(returns, var_confidence: float = 0.95) -> go.Figure:
 
     fig.add_vline(
         x=var_val,
-        line=dict(color='#d62728', width=2, dash='dash'),
+        line=dict(color=DEFAULT_THEME.danger, width=2, dash='dash'),
         row=1, col=1,
-        annotation_text=f'VaR {int(var_confidence*100)}%: {var_val:.2%}'
+        annotation_text=f'VaR {int(var_confidence*100)}%: {var_val:.2%}',
     )
     fig.add_vline(
         x=cvar_val,
         line=dict(color='#8b0000', width=2, dash='dot'),
         row=1, col=1,
-        annotation_text=f'CVaR: {cvar_val:.2%}'
+        annotation_text=f'CVaR: {cvar_val:.2%}',
     )
 
     # VaR bar chart
@@ -107,17 +111,17 @@ def create_var_chart(returns, var_confidence: float = 0.95) -> go.Figure:
         go.Bar(
             x=['VaR 95%', 'VaR 99%', 'CVaR 95%', 'CVaR 99%'],
             y=[var_95, var_99, returns[returns <= var_95].mean(), returns[returns <= var_99].mean()],
-            marker_color=['#ff7f0e', '#d62728', '#ff7f0e', '#d62728'],
-            name='Risk Metrics'
+            marker_color=[DEFAULT_THEME.warning, DEFAULT_THEME.danger, DEFAULT_THEME.warning, DEFAULT_THEME.danger],
+            name='Risk Metrics',
         ),
-        row=1, col=2
+        row=1, col=2,
     )
 
     fig.update_layout(
         height=350,
         showlegend=False,
-        plot_bgcolor='#0a0a0a',
-        paper_bgcolor='#0a0a0a',
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
     )
 
     fig.update_xaxes(title_text='Return', row=1, col=1)
@@ -139,7 +143,7 @@ def create_drawdown_chart(drawdown_series) -> go.Figure:
         Plotly Figure
     """
     if len(drawdown_series) == 0:
-        return _empty_figure("No drawdown data")
+        return empty_figure("No drawdown data", theme=DEFAULT_THEME)
 
     fig = go.Figure()
 
@@ -149,9 +153,9 @@ def create_drawdown_chart(drawdown_series) -> go.Figure:
             y=drawdown_series,
             name='Drawdown',
             fill='tozeroy',
-            fillcolor='rgba(214, 39, 40, 0.3)',
-            line=dict(color='#d62728', width=1),
-        )
+            fillcolor=f'{DEFAULT_THEME.danger}4d',
+            line=dict(color=DEFAULT_THEME.danger, width=1),
+        ),
     )
 
     # Mark max drawdown
@@ -163,10 +167,10 @@ def create_drawdown_chart(drawdown_series) -> go.Figure:
             x=[max_dd_idx],
             y=[max_dd],
             mode='markers+text',
-            marker=dict(size=12, color='#d62728', symbol='circle'),
+            marker=dict(size=12, color=DEFAULT_THEME.danger, symbol='circle'),
             text=[f'Max DD: {max_dd:.1%}'],
             textposition='top center',
-        )
+        ),
     )
 
     fig.update_layout(
@@ -174,10 +178,10 @@ def create_drawdown_chart(drawdown_series) -> go.Figure:
         height=300,
         hovermode='x unified',
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
-        yaxis=dict(tickformat='.0%', gridcolor='#eee'),
-        xaxis=dict(gridcolor='#eee'),
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
+        yaxis=dict(tickformat='.0%', gridcolor=DEFAULT_THEME.border_default),
+        xaxis=dict(gridcolor=DEFAULT_THEME.border_default),
     )
 
     return fig
@@ -194,22 +198,21 @@ def create_concentration_risk(positions: list) -> go.Figure:
         Plotly Figure
     """
     if not positions:
-        return _empty_figure("No positions")
+        return empty_figure("No positions", theme=DEFAULT_THEME)
 
     values = [p.get('market_value', 0) for p in positions]
     total = sum(values)
+    symbols = [p.get('symbol', 'Unknown') for p in positions]
 
     # Herfindahl index (concentration measure)
     weights = [v / total for v in values if total > 0]
     hhi = sum(w ** 2 for w in weights)
 
     # Bar chart of position sizes
-    symbols = [p.get('symbol', 'Unknown') for p in positions]
-
     fig = go.Figure(data=[go.Bar(
         x=symbols,
         y=values,
-        marker_color='#1f77b4',
+        marker_color=DEFAULT_THEME.primary,
     )])
 
     # Add horizontal line at equal weight
@@ -217,32 +220,18 @@ def create_concentration_risk(positions: list) -> go.Figure:
     equal_weight = total / n if n > 0 else 0
     fig.add_hline(
         y=equal_weight,
-        line=dict(color='#2ca02c', width=2, dash='dash'),
-        annotation_text=f'Equal Weight: ${equal_weight:,.0f}'
+        line=dict(color=DEFAULT_THEME.success, width=2, dash='dash'),
+        annotation_text=f'Equal Weight: ${equal_weight:,.0f}',
     )
 
     fig.update_layout(
         title=dict(text=f'Position Concentration (HHI: {hhi:.3f})', font=dict(size=16)),
         height=300,
         template='plotly_dark',
-        plot_bgcolor='#21262d',
-        paper_bgcolor='#21262d',
-        yaxis=dict(title='Market Value ($)', gridcolor='#eee'),
-        xaxis=dict(title='Symbol', gridcolor='#eee'),
+        plot_bgcolor=DEFAULT_THEME.bg_primary,
+        paper_bgcolor=DEFAULT_THEME.bg_primary,
+        yaxis=dict(title='Market Value ($)', gridcolor=DEFAULT_THEME.border_default),
+        xaxis=dict(title='Symbol', gridcolor=DEFAULT_THEME.border_default),
     )
 
-    return fig
-
-
-def _empty_figure(message: str) -> go.Figure:
-    """Create an empty figure with a message."""
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        xref="paper", yref="paper",
-        x=0.5, y=0.5,
-        showarrow=False,
-        font=dict(size=16, color="gray")
-    )
-    fig.update_layout(template='plotly_white', height=250)
     return fig
