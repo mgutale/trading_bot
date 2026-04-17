@@ -47,6 +47,7 @@ dependencies = [
     "rich>=13.0.0",
     "plotly>=5.17.0",
     "matplotlib>=3.8.0",
+    "dash>=2.14.0",
 ]
 
 [project.optional-dependencies]
