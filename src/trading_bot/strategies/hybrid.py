@@ -329,6 +329,17 @@ class HybridHMMStopLoss(BaseStrategy):
         if not self.fitted:
             self.fit(benchmark_data)
 
+        # Check if we have enough data for momentum calculation
+        min_required = self.momentum_long + 1
+        actual_days = len(benchmark_data)
+        if actual_days < min_required:
+            logger.warning(
+                f"Insufficient data for momentum calculation: "
+                f"have {actual_days} days, need {min_required} days "
+                f"(momentum_long={self.momentum_long}). "
+                f"Results will show 0 trades. Use --years 1 or more for valid backtests."
+            )
+
         # CRITICAL: Filter stock_data to match benchmark_data date range
         # This prevents look-ahead bias from stock data extending beyond benchmark
         bench_start = benchmark_data.index[0]

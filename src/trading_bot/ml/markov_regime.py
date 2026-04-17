@@ -97,6 +97,7 @@ class MarkovRegimeDetector:
         # Try multiple random seeds and select best model by BIC (deterministic)
         best_model = None
         best_bic = float('inf')
+        bic_threshold = 1.0  # Ignore negligible BIC differences (< 1.0)
 
         for attempt in range(5):
             try:
@@ -107,13 +108,18 @@ class MarkovRegimeDetector:
                     random_state=self.random_state + attempt,
                     init_params="stmc",
                     params="stmc",
-                    tol=1e-4,
+                    tol=1e-3,
                 )
                 candidate.fit(X)
                 # Verify the model has valid parameters
                 if not np.isnan(candidate.means_).any() and not np.isnan(candidate.transmat_).any():
                     bic = candidate.bic(X)
-                    if bic < best_bic:
+                    # Only accept if BIC is meaningfully better (by at least threshold)
+                    if bic < best_bic - bic_threshold:
+                        best_model = candidate
+                        best_bic = bic
+                    elif best_model is None:
+                        # Accept first valid model as baseline
                         best_model = candidate
                         best_bic = bic
             except Exception as e:
@@ -215,6 +221,7 @@ class MarkovRegimeDetector:
 
             model = None
             best_bic = float('inf')
+            bic_threshold = 1.0  # Ignore negligible BIC differences (< 1.0)
 
             # Try multiple random seeds and select best by BIC (deterministic)
             for attempt in range(3):
@@ -226,7 +233,7 @@ class MarkovRegimeDetector:
                         random_state=self.random_state + attempt,
                         init_params="stmc",
                         params="stmc",
-                        tol=1e-4,
+                        tol=1e-3,
                     )
                     candidate.fit(train_data)
 
@@ -235,7 +242,12 @@ class MarkovRegimeDetector:
                         not np.isnan(candidate.transmat_).any() and
                         np.all(candidate.transmat_.sum(axis=1) > 0.99)):
                         bic = candidate.bic(train_data)
-                        if bic < best_bic:
+                        # Only accept if BIC is meaningfully better
+                        if bic < best_bic - bic_threshold:
+                            model = candidate
+                            best_bic = bic
+                        elif model is None:
+                            # Accept first valid model as baseline
                             model = candidate
                             best_bic = bic
                 except Exception as e:
@@ -245,9 +257,11 @@ class MarkovRegimeDetector:
                 last_model = model
 
                 # Store state means for this period's model
+                # Use only the first feature (returns) for regime labeling, not volatility
                 if hasattr(model, 'means_'):
-                    state_means = model.means_.flatten()
-                    state_means_dict = {i: state_means[i] for i in range(len(state_means))}
+                    # means_ has shape (n_states, n_features) - extract return means only
+                    state_means = model.means_[:, 0] if model.means_.ndim > 1 else model.means_.flatten()
+                    state_means_dict = {i: float(state_means[i]) for i in range(len(state_means))}
                     state_means_by_period[train_end] = state_means_dict
 
                 # Predict for next period using forward-only filtering
